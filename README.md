@@ -1,3 +1,3 @@
-# aden-tf
+# calibre
 
-Probablistic Program Implementation using Tensorflow Probability
+Probabilistic-programming-based implementation using [Tensorflow Probability](https://github.com/tensorflow/probability)
