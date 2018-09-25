@@ -5,8 +5,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
 
-
-from calibre.model.gpr import gpr_predsample, rbf
+from calibre.model import gaussian_process as gp
 from calibre.util.data import generate_1d_data, sin_curve_1d
 from calibre.util.visual import gpr_1d_visual
 
@@ -62,7 +61,7 @@ mcmc_graph = tf.Graph()
 with mcmc_graph.as_default():
     # build RBF features
     N = X_train.shape[0]
-    K_mat = rbf(X_train, ls=ls_val) + 1e-6 * tf.eye(N)
+    K_mat = gp.rbf(X_train, ls=ls_val) + 1e-6 * tf.eye(N)
     S, U, V = tf.svd(K_mat)
     num_feature = tf.reduce_sum(tf.cast(S > 1e-10, tf.int32))
     features = tf.tensordot(U, tf.diag(S), [[1], [0]])[:, :num_feature]
@@ -134,10 +133,10 @@ with tf.Session(graph=mcmc_graph) as sess:
 # compute sample
 gpf_sample_lr = feature_val.dot(alpha_sample_val.T)
 
-f_test_val = gpr_predsample(X_new=X_test, X=X_train,
-                            f_sample=gpf_sample_lr,
-                            ls=ls_val, kernfunc=rbf,
-                            ridge_factor=1e-4)
+f_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
+                                      f_sample=gpf_sample_lr,
+                                      ls=ls_val, kernfunc=gp.rbf,
+                                      ridge_factor=1e-4)
 
 # visualize
 mu = np.mean(f_test_val, axis=1)

@@ -26,48 +26,9 @@ from tensorflow.python.ops.distributions.util import fill_triangular
 from scipy import stats
 import gpflowSlim as gpf
 
+from calibre.model.gaussian_process import rbf
+
 tfd = tfp.distributions
-
-""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
-""" Helper functions """
-""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
-
-
-def square_dist(X, X2=None, ls=1.):
-    """Computes Square distance between two sets of features.
-
-    Taken from GPflow.kernels.Stationary.
-
-    :param X: (np.ndarray) First set of features of dim N x D.
-    :param X2: (np.ndarray or None) Second set of features of dim N2 x D.
-    :param ls: (float) value for length scale
-    :return: (tf.Tensor) A N_new x N tensor for ||x-x'||^2
-    """
-    X = X / ls
-    Xs = tf.reduce_sum(tf.square(X), axis=1)
-
-    if X2 is None:
-        dist = -2 * tf.matmul(X, X, transpose_b=True)
-        dist += tf.reshape(Xs, (-1, 1)) + tf.reshape(Xs, (1, -1))
-        return tf.clip_by_value(dist, 0., np.inf)
-
-    X2 = X2 / ls
-    X2s = tf.reduce_sum(tf.square(X2), axis=1)
-    dist = -2 * tf.matmul(X, X2, transpose_b=True)
-    dist += tf.reshape(Xs, (-1, 1)) + tf.reshape(X2s, (1, -1))
-    return tf.clip_by_value(dist, 0., np.inf)
-
-
-def rbf(X, X2=None, ls=1.):
-    """Defines RBF kernel.
-
-    :param X: (np.ndarray) First set of features of dim N x D.
-    :param X2: (np.ndarray or None) Second set of features of dim N2 x D.
-    :param ls: (float) value for length scale
-    :return: (tf.Tensor) A N x N2 tensor for exp(-||x-x'||^2/2*ls)
-    """
-    return tf.exp(-square_dist(X, X2, ls=ls) / 2)
-
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 """ Main model definition """
@@ -77,14 +38,17 @@ def rbf(X, X2=None, ls=1.):
 def model(X, ls=1., ridge_factor=1e-4):
     """Defines the Gaussian Process Model.
 
-    :param X: (np.ndarray of float32) input training features.
+    Args:
+        X: (np.ndarray of float32) input training features.
         with dimension (N, D).
-    :param ls: (float32) length scale parameter.
-    :param ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition
-    :return: (tf.Tensors of float32) model parameters.
+        ls: (float32) length scale parameter.
+        ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
+
+    Returns:
+         (tf.Tensors of float32) model parameters.
     """
     N = X.shape[0]
-    K_mat = rbf(X, ls=ls) + ridge_factor * tf.eye(N)
+    K_mat = rbf(X, ls=ls, ridge_factor=ridge_factor)
 
     gp_f = ed.MultivariateNormalTriL(loc=tf.zeros(N),
                                      scale_tril=tf.cholesky(K_mat),
@@ -98,75 +62,6 @@ def model(X, ls=1., ridge_factor=1e-4):
 
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
-""" Predictive Sampling functions """
-""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
-
-
-def predmean(X_new, X, f_sample, ls, kernfunc=rbf, ridge_factor=1e-3):
-    """Sample posterior mean for f^*.
-
-    Posterior for f_new is conditionally independent from other parameters
-        in the model, therefore it's conditional posterior mean
-        can be obtained by sampling from the posterior conditional f^* | f:
-
-    In particular, we care about posterior predictive mean, i.e.
-        E(f^*|f) =  K(X^*, X)K(X, X)^{-1}f
-
-    :param X_new: (np.ndarray of float) testing locations, N_new x D
-    :param X: (np.ndarray of float) training locations, N x D
-    :param f_sample: (np.ndarray of float) M samples of posterior GP sample, N x M
-    :param ls: (float) training lengthscale
-    :param kern_func: (function) kernel function.
-    :param ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition.
-    :return: (np.ndarray) N_new x M vectors of posterior predictive mean samples
-    """
-    Kx = kernfunc(X, X_new, ls=ls)
-    K = kernfunc(X, ls=ls)
-    # add ridge factor to stabilize inversion.
-    K_inv_f = tf.matrix_solve(K + ridge_factor * tf.eye(tf.shape(X)[0]),
-                              f_sample)
-    return tf.matmul(Kx, K_inv_f, transpose_a=True)
-
-
-def predsample(X_new, X, f_sample, ls, kernfunc=rbf, ridge_factor=1e-3):
-    """Sample posterior predictive distribution.
-
-    Sample posterior conditional from f^* | f ~ MVN, where:
-
-        E(f*|f) = K(X*, X)K(X, X)^{-1}f
-        Var(f*|f) = K(X*, X*) - K(X*, X)K(X, X)^{-1}K(X, X*)
-
-    :param X_new: (np.ndarray of float) testing locations, N_new x D
-    :param X: (np.ndarray of float) training locations, N x D
-    :param f: (np.ndarray of float) M samples of posterior GP sample, N x M
-    :param ls: (float) training lengthscale
-    :param kern_func: (function) kernel function.
-    :param ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition.
-    :return: (np.ndarray) N_new x M vectors of posterior predictive mean samples
-    """
-    N_new, _ = X_new.shape
-    N, M = f_sample.shape
-
-    # compute basic components
-    Kxx = kernfunc(X_new, X_new, ls=ls)
-    Kx = kernfunc(X, X_new, ls=ls)
-    K = kernfunc(X, ls=ls)
-    K_inv = tf.matrix_inverse(K + ridge_factor * tf.eye(N))
-
-    # compute conditional mean and variance.
-    mu_sample = tf.matmul(Kx, tf.matmul(K_inv, f_sample), transpose_a=True)
-    Sigma = Kxx - tf.matmul(Kx, tf.matmul(K_inv, Kx), transpose_a=True)
-
-    # sample
-    with tf.Session() as sess:
-        cond_means, cond_cov = sess.run([mu_sample, Sigma])
-
-    f_new_centered = np.random.multivariate_normal(
-        mean=[0] * N_new, cov=cond_cov, size=M).T
-    return f_new_centered + cond_means
-
-
-""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 """ Variational family I: Mean field """
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
@@ -174,9 +69,11 @@ def predsample(X_new, X, f_sample, ls, kernfunc=rbf, ridge_factor=1e-3):
 def variational_meanfield(X):
     """Defines the mean-field variational family for GPR.
 
-    :param X: (np.ndarray of float32) input training features.
+    Args:
+        X: (np.ndarray of float32) input training features.
         with dimension (N, D).
-    :return:
+
+    Returns:
         q_f, q_sig: (ed.RandomVariable) variational family.
         q_f_mean, q_f_sdev: (tf.Variable) variational parameters for q_f
     """
@@ -199,12 +96,15 @@ def variational_meanfield(X):
 def variational_meanfield_sample(n_sample, qf_mean, qf_sdev):
     """Generates f samples from GPR mean-field variational family.
 
-    :param n_sample: (int) number of samples to draw
-    :param qf_mean: (tf.Tensor of float32) mean parameters for
+    Args:
+        n_sample: (int) number of samples to draw
+        qf_mean: (tf.Tensor of float32) mean parameters for
         variational family
-    :param qf_sdev: (tf.Tensor of float32) standard deviation
+        qf_sdev: (tf.Tensor of float32) standard deviation
         parameters for variational family
-    :return: (np.ndarray) sampled values.
+
+    Returns:
+         (np.ndarray) sampled values.
     """
 
     """Generates f samples from GPR mean-field variational family."""
@@ -243,12 +143,14 @@ Consequently, U can be marginalized out, such that q(F) becomes
 def variational_sgp(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
     """Defines the mean-field variational family for GPR.
 
-    :param X: (np.ndarray of float32) input training features, with dimension (Nx, D).
-    :param Z: (np.ndarray of float32) inducing points, with dimension (Nz, D).
-    :param ls: (float32) length scale parameter.
-    :param kern_func: (function) kernel function.
-    :param ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition
-    :return:
+    Args:
+        X: (np.ndarray of float32) input training features, with dimension (Nx, D).
+        Z: (np.ndarray of float32) inducing points, with dimension (Nz, D).
+        ls: (float32) length scale parameter.
+        kern_func: (function) kernel function.
+        ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition
+
+    Returns:
         q_f, q_sig: (ed.RandomVariable) variational family.
         q_f_mean, q_f_sdev: (tf.Variable) variational parameters for q_f
     """
@@ -257,7 +159,7 @@ def variational_sgp(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
     # compute matrix constants
     Kxx = kern_func(X, ls=ls)
     Kxz = kern_func(X, Z, ls=ls)
-    Kzz = kern_func(Z, ls=ls) + ridge_factor * tf.eye(Nz)
+    Kzz = kern_func(Z, ls=ls, ridge_factor=ridge_factor)
 
     # compute null covariance matrix using Cholesky decomposition
     Kzz_chol_inv = tf.matrix_inverse(tf.cholesky(Kzz))
@@ -300,12 +202,15 @@ def variational_sgp(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
 def variational_sgp_sample(n_sample, qf_mean, qf_cov):
     """Generates f samples from GPR mean-field variational family.
 
-    :param n_sample: (int) number of samples to draw
-    :param qf_mean: (tf.Tensor of float32) mean parameters for
+    Args:
+        n_sample: (int) number of samples to draw
+        qf_mean: (tf.Tensor of float32) mean parameters for
         variational family
-    :param qf_cov: (tf.Tensor of float32) covariance for
+        qf_cov: (tf.Tensor of float32) covariance for
         parameters for variational family
-    :return: (np.ndarray) sampled values.
+
+    Returns:
+        (np.ndarray) sampled values.
     """
 
     """Generates f samples from GPR mean-field variational family."""
@@ -320,21 +225,22 @@ def variational_sgp_sample(n_sample, qf_mean, qf_cov):
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
-def fit_gpflow(X_train, y_train, X_test, y_test,
-               kern_func=None, tune_kern_param=False, n_iter=20000,
-               **kwargs
-               ):
+def fit_gpflow(X_train, y_train,
+               X_test, X_valid,
+               kern_func=None, n_step=10000,
+               **kwargs):
     """Fits GP regression using GPflow
 
-    :param X_train: (np.ndarray of float32) Training data (N_train, D).
-    :param y_train: (np.ndarray of float32) Training labels (N_train, D).
-    :param X_test: (np.ndarray of float32) Testintg features (N_test, D).
-    :param y_test: (np.ndarray of float32) Testing labels (N_test, D).
-    :param kern_func: (gpflow.kernels) GPflow kernel function.
-    :param tune_kern_param: (bool) Whether to tune kernel parameters.
-    :param n_iter: (int) number of optimization iterations.
-    :param kwargs: Additional arguments passed to kern_func.
-    :return:
+    Args:
+        X_train: (np.ndarray of float32) Training data (N_train, D).
+        y_train: (np.ndarray of float32) Training labels (N_train, D).
+        X_test: (np.ndarray of float32) Testintg features (N_test, D).
+        X_valid: (np.ndarray of float32) Validation features (N_test, D).
+        kern_func: (gpflow.kernels) GPflow kernel function.
+        n_step: (int) number of optimization iterations.
+        kwargs: Additional arguments passed to kern_func.
+
+    Returns::
         mu, var: (np.ndarray) Posterior predictive mean/variance.
         par_val: (list of np.ndarray) List of model parameter values
         m: (gpflow.models.gpr) gpflow model object.
@@ -342,7 +248,6 @@ def fit_gpflow(X_train, y_train, X_test, y_test,
     """
     if y_train.ndim == 1:
         y_train = np.expand_dims(y_train, 1)
-
 
     # define computation graph
     gpr_graph = tf.Graph()
@@ -352,9 +257,7 @@ def fit_gpflow(X_train, y_train, X_test, y_test,
         if not kern_func:
             k = gpf.kernels.RBF(input_dim=X_train.shape[1], ARD=True)
         else:
-            k = kern_func(input_dim=X_train.shape[1],
-                          train_kernel_param=tune_kern_param,
-                          **kwargs)
+            k = kern_func(input_dim=X_train.shape[1], **kwargs)
 
         m = gpf.models.GPR(X_train, y_train, kern=k)
 
@@ -365,33 +268,31 @@ def fit_gpflow(X_train, y_train, X_test, y_test,
         train_op = optimizer.minimize(objective)
 
         # define prediction
-        pred_mu, pred_cov = m.predict_f(X_test)
+        pred_mu_test, pred_cov_test = m.predict_f(X_test)
+        pred_mu_valid, pred_cov_valid = m.predict_f(X_valid)
 
         init_op = tf.global_variables_initializer()
 
         gpr_graph.finalize()
 
-
     # execute training
     with tf.Session(graph=gpr_graph) as sess:
         sess.run(init_op)
-        for iter in range(n_iter):
+        for step in range(n_step):
             _, obj = sess.run([train_op, objective])
 
-            if iter % 1000 == 0:
-                print('Iter {}: Loss = {}'.format(iter, obj))
+            if step % 1000 == 0:
+                print('Iter {}: Loss = {}'.format(step, obj))
 
                 # evaluate
-                mu, var, par_dict = sess.run([pred_mu, pred_cov, param_dict])
-                mu, var = mu.squeeze(), var.squeeze()
-                rmse = np.mean((mu - y_test) ** 2) ** .5
+                (mu_test, var_test,
+                 mu_valid, var_valid, par_dict) = sess.run(
+                    [pred_mu_test, pred_cov_test,
+                     pred_mu_valid, pred_cov_valid, param_dict])
 
-                log_likelihood = np.mean(
-                    np.log(stats.norm.pdf(y_test.squeeze(),
-                                          loc=mu, scale=var ** 0.5)))
-                print('test rmse = {}'.format(rmse))
+                mu_test, var_test = mu_test.squeeze(), var_test.squeeze()
+                mu_valid, var_valid = mu_valid.squeeze(), var_valid.squeeze()
+
         sess.close()
 
-        print('tset ll = {}'.format(log_likelihood))
-
-    return mu, var, par_dict, m, k
+    return mu_test, var_test, mu_valid, var_valid, par_dict, m, k

@@ -24,13 +24,14 @@ from tensorflow_probability import edward2 as ed
 from scipy import stats
 import gpflowSlim as gpf
 
-from calibre.model import gpr
+from calibre.model import gaussian_process as gp
+from calibre.model import gp_regression
+
 from calibre.util.inference import make_value_setter
 from calibre.util.data import generate_1d_data, sin_curve_1d
 from calibre.util.visual import gpr_1d_visual
 
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 tfd = tfp.distributions
 
@@ -69,7 +70,7 @@ ls_val = 0.1
 mcmc_graph = tf.Graph()
 with mcmc_graph.as_default():
     # build likelihood by explicitly
-    log_joint = ed.make_log_joint_fn(gpr.model)
+    log_joint = ed.make_log_joint_fn(gp_regression.model)
 
 
     def target_log_prob_fn(gp_f, sigma):
@@ -130,9 +131,9 @@ with tf.Session(graph=mcmc_graph) as sess:
 
 """ 2.3. prediction and visualization"""
 # prediction
-f_test_val = gpr.predsample(X_new=X_test, X=X_train,
-                            f_sample=f_samples_val.T,
-                            ls=ls_val, kernfunc=rbf)
+f_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
+                                      f_sample=f_samples_val.T,
+                                      ls=ls_val, kern_func=gp.rbf)
 
 # visualize
 mu = np.mean(f_test_val, axis=1)
@@ -141,7 +142,7 @@ cov = np.var(f_test_val, axis=1)
 gpr_1d_visual(mu, cov,
               X_train, y_train, X_test, y_test,
               title="RBF, Hamilton MC",
-              save_addr="./plot/gpr_hmc.png")
+              save_addr="./plot/gpr/gpr_hmc.png")
 
 """""""""""""""""""""""""""""""""
 # 3. Mean-field VI with Exact Predictive
@@ -153,12 +154,12 @@ ls_val = 0.1
 
 with mfvi_graph.as_default():
     # sample from variational family
-    q_f, q_sig, qf_mean, qf_sdev = gpr.variational_meanfield(X=X_train)
+    q_f, q_sig, qf_mean, qf_sdev = gp_regression.variational_meanfield(X=X_train)
 
     # compute the expected predictive log-likelihood
     with ed.tape() as model_tape:
         with ed.interception(make_value_setter(gp_f=q_f, sigma=q_sig)):
-            _, _, y = gpr.model(X=X_train, ls=ls_val)
+            _, _, y = gp_regression.model(X=X_train, ls=ls_val)
 
     log_likelihood = y.distribution.log_prob(y_train)
 
@@ -202,15 +203,15 @@ with tf.Session(graph=mfvi_graph) as sess:
 
 """ 3.3. prediction & visualization """
 with tf.Session() as sess:
-    f_samples = gpr.variational_meanfield_sample(n_sample=10000,
-                                                 qf_mean=qf_mean_val,
-                                                 qf_sdev=qf_sdev_val)
+    f_samples = gp_regression.variational_meanfield_sample(n_sample=10000,
+                                                           qf_mean=qf_mean_val,
+                                                           qf_sdev=qf_sdev_val)
     f_samples_val = sess.run(f_samples)
 
 # still use exact posterior predictive
-f_test_val = gpr.predsample(X_new=X_test, X=X_train,
-                            f_sample=f_samples_val.T,
-                            ls=ls_val, kernfunc=rbf)
+f_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
+                                      f_sample=f_samples_val.T,
+                                      ls=ls_val, kern_func=gp.rbf)
 
 # visualize
 mu = np.mean(f_test_val, axis=1)
@@ -219,7 +220,7 @@ cov = np.var(f_test_val, axis=1)
 gpr_1d_visual(mu, cov,
               X_train, y_train, X_test, y_test,
               title="RBF, Mean-field VI",
-              save_addr="./plot/gpr_mfvi.png")
+              save_addr="./plot/gpr/gpr_mfvi.png")
 
 """""""""""""""""""""""""""""""""
 # 4. Sparse GP (Structured VI)
@@ -236,14 +237,14 @@ with sgp_graph.as_default():
 
     (q_f, q_sig, qf_mean, qf_cov,
      Sigma_pre, S, Kxx, Kxz,
-     Kzz, Kzz_inv, Kxz_Kzz_inv) = gpr.variational_sgp(X=X_train,
-                                                      Z=X_induce,
-                                                      ls=ls_val)
+     Kzz, Kzz_inv, Kxz_Kzz_inv) = gp_regression.variational_sgp(X=X_train,
+                                                                Z=X_induce,
+                                                                ls=ls_val)
 
     # compute the expected predictive log-likelihood
     with ed.tape() as model_tape:
         with ed.interception(make_value_setter(gp_f=q_f, sigma=q_sig)):
-            _, _, y = gpr.model(X=X_train, ls=ls_val)
+            _, _, y = gp_regression.model(X=X_train, ls=ls_val)
 
     log_likelihood = y.distribution.log_prob(y_train)
 
@@ -290,15 +291,15 @@ with tf.Session(graph=sgp_graph) as sess:
 
 """ 3.3. prediction & visualization """
 with tf.Session() as sess:
-    f_samples = gpr.variational_sgp_sample(n_sample=10000,
-                                           qf_mean=qf_mean_val,
-                                           qf_cov=qf_cov_val)
+    f_samples = gp_regression.variational_sgp_sample(n_sample=10000,
+                                                     qf_mean=qf_mean_val,
+                                                     qf_cov=qf_cov_val)
     f_samples_val = sess.run(f_samples)
 
 # still use exact posterior predictive
-f_test_val = gpr.predsample(X_new=X_test, X=X_train,
-                            f_sample=f_samples_val.T,
-                            ls=ls_val, kernfunc=gpr.rbf)
+f_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
+                                      f_sample=f_samples_val.T,
+                                      ls=ls_val, kern_func=gp.rbf)
 
 # visualize
 mu = np.mean(f_test_val, axis=1)
@@ -308,7 +309,7 @@ gpr_1d_visual(mu, cov,
               X_train, y_train, X_test, y_test,
               X_induce=X_induce,
               title="RBF, Structured VI (Sparse GP)",
-              save_addr="./plot/gpr_sgp.png")
+              save_addr="./plot/gpr/gpr_sgp.png")
 
 """""""""""""""""""""""""""""""""
 # 5. Decoupled Sparse GP
@@ -337,10 +338,10 @@ tf.reset_default_graph()
 kern_func = gpf.kernels.RBF
 kern_pars = {'ARD': False, 'lengthscales': 1.}
 
-mu, var, par_val, m, k = gpr.fit_gpflow(X_train, y_train, X_test, y_test,
-                                        kern_func=kern_func, **kern_pars)
+mu, var, par_val, m, k = gp_regression.fit_gpflow(X_train, y_train, X_test, y_test,
+                                                  kern_func=kern_func, **kern_pars)
 # visualization
 gpr_1d_visual(mu, var,
               X_train, y_train, X_test, y_test,
               title="RBF, MAP, GPflow Implementation",
-              save_addr="./plot/gpr_gpflow.png")
+              save_addr="./plot/gpr/gpr_gpflow.png")
