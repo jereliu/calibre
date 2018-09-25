@@ -16,15 +16,10 @@ Define a classic Gaussian Process model with RBF kernel.
         https://arxiv.org/pdf/1801.02939.pdf
 """
 
-import numpy as np
-
 import tensorflow as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
 from tensorflow.python.ops.distributions.util import fill_triangular
-
-from scipy import stats
-import gpflowSlim as gpf
 
 from calibre.model.gaussian_process import rbf
 
@@ -218,81 +213,3 @@ def variational_sgp_sample(n_sample, qf_mean, qf_cov):
                                                covariance_matrix=qf_cov,
                                                name='q_f')
     return q_f.sample(n_sample)
-
-
-""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
-""" Predictive functions, GPflow Implementation """
-""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
-
-
-def fit_gpflow(X_train, y_train,
-               X_test, X_valid,
-               kern_func=None, n_step=10000,
-               **kwargs):
-    """Fits GP regression using GPflow
-
-    Args:
-        X_train: (np.ndarray of float32) Training data (N_train, D).
-        y_train: (np.ndarray of float32) Training labels (N_train, D).
-        X_test: (np.ndarray of float32) Testintg features (N_test, D).
-        X_valid: (np.ndarray of float32) Validation features (N_test, D).
-        kern_func: (gpflow.kernels) GPflow kernel function.
-        n_step: (int) number of optimization iterations.
-        kwargs: Additional arguments passed to kern_func.
-
-    Returns::
-        mu, var: (np.ndarray) Posterior predictive mean/variance.
-        par_val: (list of np.ndarray) List of model parameter values
-        m: (gpflow.models.gpr) gpflow model object.
-        k: (gpflow.kernels) gpflow kernel object.
-    """
-    if y_train.ndim == 1:
-        y_train = np.expand_dims(y_train, 1)
-
-    # define computation graph
-    gpr_graph = tf.Graph()
-    with gpr_graph.as_default():
-
-        # define model
-        if not kern_func:
-            k = gpf.kernels.RBF(input_dim=X_train.shape[1], ARD=True)
-        else:
-            k = kern_func(input_dim=X_train.shape[1], **kwargs)
-
-        m = gpf.models.GPR(X_train, y_train, kern=k)
-
-        # define optimization
-        objective = m.objective
-        param_dict = {par.name: par.value for par in m.parameters}
-        optimizer = tf.train.AdamOptimizer(1e-3)
-        train_op = optimizer.minimize(objective)
-
-        # define prediction
-        pred_mu_test, pred_cov_test = m.predict_f(X_test)
-        pred_mu_valid, pred_cov_valid = m.predict_f(X_valid)
-
-        init_op = tf.global_variables_initializer()
-
-        gpr_graph.finalize()
-
-    # execute training
-    with tf.Session(graph=gpr_graph) as sess:
-        sess.run(init_op)
-        for step in range(n_step):
-            _, obj = sess.run([train_op, objective])
-
-            if step % 1000 == 0:
-                print('Iter {}: Loss = {}'.format(step, obj))
-
-                # evaluate
-                (mu_test, var_test,
-                 mu_valid, var_valid, par_dict) = sess.run(
-                    [pred_mu_test, pred_cov_test,
-                     pred_mu_valid, pred_cov_valid, param_dict])
-
-                mu_test, var_test = mu_test.squeeze(), var_test.squeeze()
-                mu_valid, var_valid = mu_valid.squeeze(), var_valid.squeeze()
-
-        sess.close()
-
-    return mu_test, var_test, mu_valid, var_valid, par_dict, m, k
