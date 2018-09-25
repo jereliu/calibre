@@ -1,3 +1,4 @@
+"""Model definitions and sampling functions for Gaussian Process"""
 import numpy as np
 
 import tensorflow as tf
