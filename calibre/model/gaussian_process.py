@@ -1,4 +1,4 @@
-"""Model definitions and sampling functions for Gaussian Process"""
+"""Model definitions and sampling functions for Gaussian Process Prior"""
 import numpy as np
 
 import tensorflow as tf
@@ -73,6 +73,7 @@ def prior(X, ls, kernel_func=rbf,
         X: (np.ndarray of float32) input training features.
         with dimension (N, D).
         kernel_func: (function) kernel function for the gaussian process.
+            Default to rbf.
         ls: (float32) length scale parameter.
         ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
         name: (str) name of the random variable
