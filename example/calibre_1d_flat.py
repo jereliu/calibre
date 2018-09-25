@@ -17,8 +17,8 @@ sys.path.extend([os.getcwd()])
 
 from calibre.model import gaussian_process as gp
 from calibre.model import adaptive_ensemble
-from calibre.model.gp_regression import fit_gpflow
 
+from calibre.model.gp_regression import fit_gpflow
 import calibre.util.visual as visual_util
 from calibre.util.inference import make_value_setter
 from calibre.util.data import generate_1d_data, sin_curve_1d
@@ -185,16 +185,21 @@ with open('./plot/calibre/base/base_valid_sample.pkl', 'wb') as file:
 # 1. MCMC
 """""""""""""""""""""""""""""""""
 base_test_pred = pk.load(open('./plot/calibre/base/base_test_pred.pkl', 'rb'))
+base_valid_pred = pk.load(open('./plot/calibre/base/base_valid_pred.pkl', 'rb'))
+
 base_test_pred = {key: value for key, value in base_test_pred.items() if
                   ('rbf' in key)}
+base_valid_pred = {key: value for key, value in base_valid_pred.items()
+                   if key in list(base_test_pred.keys())}
+
 
 """2.1. sampler basic config"""
 N = X_test.shape[0]
 K = len(base_test_pred)
 num_results = 10000
 num_burnin_steps = 5000
-ls_weight = 0.05
-ls_resid = 0.1
+ls_weight = 0.15
+ls_resid = 0.2
 
 # define mcmc computation graph
 mcmc_graph = tf.Graph()
@@ -204,7 +209,7 @@ with mcmc_graph.as_default():
 
     # Note: ignore the first weight
     base_weight_names = ['base_weight_{}'.format(model_name) for
-                         model_name in list(base_test_pred.keys())][1:]
+                         model_name in list(base_test_pred.keys())]
 
 
     def target_log_prob_fn(sigma, temp, ensemble_resid,
@@ -297,10 +302,6 @@ with open('./plot/calibre/weight_sample.pkl', 'wb') as file:
     pk.dump(weight_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
 """ 2.3. prediction and visualization"""
-base_valid_pred = pk.load(open('./plot/calibre/base/base_valid_pred.pkl', 'rb'))
-base_valid_pred = {key: value for key, value in base_valid_pred.items()
-                   if key in list(base_test_pred.keys())}
-
 sigma_sample_val = pk.load(open('./plot/calibre/sigma_sample.pkl', 'rb'))
 temp_sample_val = pk.load(open('./plot/calibre/temp_sample.pkl', 'rb'))
 weight_sample_val = pk.load(open('./plot/calibre/weight_sample.pkl', 'rb'))

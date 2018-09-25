@@ -1,4 +1,4 @@
-"""Adaptive Ensemble using Tail-free Prior. """
+"""Model and Sampling functions for Adaptive Ensemble using Tail-free Prior. """
 
 import numpy as np
 
@@ -67,16 +67,14 @@ def sparse_ensemble_weight(X, base_pred, temp,
 
     # TODO(jereliu): execute below operations by family group.
     # specify un-normalized GP weights
-    num_base_model = len(base_pred)
     base_names = list(base_pred.keys())
 
     # Note: skip the first model
     W_raw = tf.stack([
         gp.prior(X, kernel_func=kernel_func,
                  ridge_factor=ridge_factor,
-                 name='base_weight_{}'.format(base_names[k + 1]),
-                 **kwargs)
-        for k in range(num_base_model - 1)], axis=1)
+                 name='base_weight_{}'.format(base_names), **kwargs)
+        for base_names in base_names], axis=1)
 
     # specify normalized GP weights by family group
     W_model = link_func(W_raw, tf.exp(temp), name=name)

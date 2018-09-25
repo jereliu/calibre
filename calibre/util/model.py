@@ -25,8 +25,12 @@ def sparse_softmax(logits, temp, name='weight'):
     Raises:
         ValueError: If dimension of logits is not 2
     """
+    # TODO(jereliu): identify efficient method for multivariate expit
+
     logits = tf.convert_to_tensor(logits)
     temp = tf.convert_to_tensor(temp)
+
+    batch_sample_size = logits.get_shape().as_list()[:-1]
 
     # check dimension
     if not logits.get_shape().ndims >= 2:
@@ -37,7 +41,7 @@ def sparse_softmax(logits, temp, name='weight'):
     temp = tf.reshape(temp, shape=temp.get_shape().as_list() + [1] * dim_diff)
 
     # compute denominator
-    denom = 1. + tf.reduce_sum(tf.exp(logits / temp), -1, keepdims=True)
+    log_exp_list = -logits / temp
+    log_expits = log_exp_list - tf.reduce_logsumexp(log_exp_list, -1, keepdims=True)
 
-    return tf.concat([1. / denom, tf.exp(logits / temp) / denom],
-                     axis=-1, name=name)
+    return tf.exp(log_expits, name=name)
