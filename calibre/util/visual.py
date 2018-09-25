@@ -63,7 +63,7 @@ def gpr_1d_visual(pred_mean_test, pred_cov_test,
 
 
 def plot_base_prediction(base_pred, X_valid, y_valid=None,
-                         X_train=None, y_train=None, save_addr=""):
+                         X_train=None, y_train=None, save_addr="", **kwargs):
     if save_addr:
         plt.ioff()
 
@@ -80,7 +80,8 @@ def plot_base_prediction(base_pred, X_valid, y_valid=None,
     if isinstance(y_valid, np.ndarray):
         plt.plot(X_valid, y_valid, c='black')
 
-    sns.lineplot(x="x", y="y", hue="model", alpha=0.7, data=sns_data)
+    sns.lineplot(x="x", y="y", hue="model", alpha=0.7,
+                 data=sns_data, **kwargs)
     plt.ylim(-4, 4)
     plt.title("Base Model Predictions")
     plt.legend(loc='lower left')
