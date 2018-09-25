@@ -142,7 +142,7 @@ cov = np.var(f_test_val, axis=1)
 gpr_1d_visual(mu, cov,
               X_train, y_train, X_test, y_test,
               title="RBF, Hamilton MC",
-              save_addr="./plot/gpr/gpr_hmc.png")
+              save_addr="./result/gpr/gpr_hmc.png")
 
 """""""""""""""""""""""""""""""""
 # 3. Mean-field VI with Exact Predictive
@@ -220,7 +220,7 @@ cov = np.var(f_test_val, axis=1)
 gpr_1d_visual(mu, cov,
               X_train, y_train, X_test, y_test,
               title="RBF, Mean-field VI",
-              save_addr="./plot/gpr/gpr_mfvi.png")
+              save_addr="./result/gpr/gpr_mfvi.png")
 
 """""""""""""""""""""""""""""""""
 # 4. Sparse GP (Structured VI)
@@ -309,7 +309,7 @@ gpr_1d_visual(mu, cov,
               X_train, y_train, X_test, y_test,
               X_induce=X_induce,
               title="RBF, Structured VI (Sparse GP)",
-              save_addr="./plot/gpr/gpr_sgp.png")
+              save_addr="./result/gpr/gpr_sgp.png")
 
 """""""""""""""""""""""""""""""""
 # 5. Decoupled Sparse GP
@@ -344,4 +344,4 @@ mu, var, par_val, m, k = gp_regression.fit_gpflow(X_train, y_train, X_test, y_te
 gpr_1d_visual(mu, var,
               X_train, y_train, X_test, y_test,
               title="RBF, MAP, GPflow Implementation",
-              save_addr="./plot/gpr/gpr_gpflow.png")
+              save_addr="./result/gpr/gpr_gpflow.png")

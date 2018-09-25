@@ -145,4 +145,4 @@ cov = np.var(f_test_val, axis=1)
 gpr_1d_visual(mu, cov,
               X_train, y_train, X_test, y_test,
               title="RBF, MCMC, Linear Regression Approximation",
-              save_addr="./plot/gpr_mcmc_lr.png")
+              save_addr="./result/gpr/gpr_mcmc_lr.png")
