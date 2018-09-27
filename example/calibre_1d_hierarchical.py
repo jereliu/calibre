@@ -16,6 +16,7 @@ import gpflowSlim as gpf
 sys.path.extend([os.getcwd()])
 
 from calibre.model import gaussian_process as gp
+from calibre.model import tailfree_process as tail_free
 from calibre.model import adaptive_ensemble
 
 import calibre.util.visual as visual_util
@@ -29,12 +30,17 @@ import seaborn as sns
 
 tfd = tfp.distributions
 
-_TEMP_PRIOR_MEAN = -5.
-_TEMP_PRIOR_SDEV = 1.
 _SAVE_ADDR_PREFIX = "./result/calibre_1d_tree"
 _FIT_BASE_MODELS = False
 
-_EXAMPLE_DICTIONARY = {
+_EXAMPLE_DICTIONARY_SHORT = {
+    "root": ["rbf", "poly"],
+    "rbf": ["rbf_1", "rbf_0.5", "rbf_0.2",
+            "rbf_0.05", "rbf_0.01", "rbf_auto"],
+    "poly": ["poly_1", "poly_2", "poly_3"]
+}
+
+_EXAMPLE_DICTIONARY_FULL = {
     "root": ["rbf", "period", "rquad", "poly"],
     "rbf": ["rbf_1", "rbf_0.5", "rbf_0.2",
             "rbf_0.05", "rbf_0.01", "rbf_auto"],
@@ -97,10 +103,127 @@ with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_test_pred.pkl'), 'rb') as f
 with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_valid_pred.pkl'), 'rb') as file:
     base_valid_pred = pk.load(file)
 
-base_test_pred = {key: value for key, value in base_test_pred.items() if
-                  ('rbf' in key)}
-base_valid_pred = {key: value for key, value in base_valid_pred.items()
-                   if key in list(base_test_pred.keys())}
+"""2.1. sampler basic config"""
+N = X_test.shape[0]
+K = len(base_test_pred)
+ls_weight = 0.15
+ls_resid = 0.1
+family_tree_dict = _EXAMPLE_DICTIONARY_SHORT
+
+num_results = 10000
+num_burnin_steps = 5000
+
+# define mcmc computation graph
+mcmc_graph = tf.Graph()
+with mcmc_graph.as_default():
+    # build likelihood by explicitly
+    log_joint = ed.make_log_joint_fn(adaptive_ensemble.model_tailfree)
+
+    # aggregate node-specific variable names
+    cond_weight_temp_names = ['temp_{}'.format(model_name) for
+                       model_name in
+                       tail_free.get_nonleaf_node_names(family_tree_dict)]
+    node_weight_names = ['base_weight_{}'.format(model_name) for
+                         model_name in
+                         tail_free.get_nonroot_node_names(family_tree_dict)]
+    node_specific_varnames = cond_weight_temp_names + node_weight_names
+
+    def target_log_prob_fn(sigma, ensemble_resid,
+                           *node_specific_positional_args):
+        """Unnormalized target density as a function of states."""
+        # build kwargs for base model weight using positional args
+        node_specific_kwargs = dict(zip(node_specific_varnames,
+                                        node_specific_positional_args))
+
+        return log_joint(X=X_test, base_pred=base_test_pred,
+                         family_tree=family_tree_dict,
+                         ls_weight=ls_weight, ls_resid=ls_resid,
+                         y=y_test.squeeze(),
+                         sigma=sigma,
+                         ensemble_resid=ensemble_resid,
+                         **node_specific_kwargs)
+
+
+    # set up state container
+    initial_state = [
+                        # tf.random_normal([N, K], stddev=0.01, name='init_ensemble_weight'),
+                        # tf.random_normal([N], stddev=0.01, name='init_f_ensemble'),
+                        tf.constant(0.1, name='init_sigma'),
+                        tf.random_normal([N], stddev=0.01,
+                                         name='init_ensemble_resid'),
+                    ] + [
+                        tf.random_normal([], stddev=0.01,
+                                         name='init_{}'.format(var_name)) for
+                        var_name in cond_weight_temp_names
+                    ] + [
+                        tf.random_normal([N], stddev=0.01,
+                                         name='init_{}'.format(var_name)) for
+                        var_name in node_weight_names
+                    ]
+
+    # set up HMC transition kernel
+    step_size = tf.get_variable(
+        name='step_size',
+        initializer=1.,
+        use_resource=True,  # For TFE compatibility.
+        trainable=False)
+
+    hmc = tfp.mcmc.HamiltonianMonteCarlo(
+        target_log_prob_fn=target_log_prob_fn,
+        num_leapfrog_steps=3,
+        step_size=step_size,
+        step_size_update_fn=tfp.mcmc.make_simple_step_size_update_policy())
+
+    # set up main sampler
+    state, kernel_results = tfp.mcmc.sample_chain(
+        num_results=num_results,
+        num_burnin_steps=num_burnin_steps,
+        current_state=initial_state,
+        kernel=hmc,
+        parallel_iterations=1
+    )
+
+    sigma_sample, ensemble_resid_sample = state[:2]
+    temp_sample = state[2:2 + len(cond_weight_temp_names)]
+    weight_sample = state[2 + len(cond_weight_temp_names):]
+
+    # set up init op
+    init_op = tf.global_variables_initializer()
+
+    mcmc_graph.finalize()
+
+""" 2.2. execute sampling"""
+with tf.Session(graph=mcmc_graph) as sess:
+    init_op.run()
+    [
+        sigma_sample_val,
+        temp_sample_val,
+        resid_sample_val,
+        weight_sample_val,
+        is_accepted_,
+    ] = sess.run(
+        [
+            sigma_sample,
+            temp_sample,
+            ensemble_resid_sample,
+            weight_sample,
+            kernel_results.is_accepted,
+        ])
+    print('Acceptance Rate: {}'.format(np.mean(is_accepted_)))
+    sess.close()
+
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'sigma_sample.pkl'), 'wb') as file:
+    pk.dump(sigma_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'temp_sample.pkl'), 'wb') as file:
+    pk.dump(temp_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'ensemble_resid_sample.pkl'), 'wb') as file:
+    pk.dump(resid_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'weight_sample.pkl'), 'wb') as file:
+    pk.dump(weight_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+
+
+
+
 
 
 """""""""""""""""""""""""""""""""
