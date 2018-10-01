@@ -22,9 +22,11 @@ from calibre.model import gaussian_process as gp
 
 from calibre.util.model import sparse_softmax
 
-_TEMP_PRIOR_MEAN = -5.
+_TEMP_PRIOR_MEAN = -4.
 _TEMP_PRIOR_SDEV = 1.
 _ROOT_NODE_NAME = "root"
+
+# TODO(jereliu): add option to force binary tree.
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 """ Utility functions """
@@ -45,7 +47,7 @@ def get_nonroot_node_names(family_tree):
     return np.concatenate(list(family_tree.values()))
 
 
-def get_nonleaf_node_names(family_tree):
+def get_parent_node_names(family_tree):
     """Get names of non-leaf nodes of input family tree.
 
     Args:
@@ -71,7 +73,7 @@ def get_leaf_model_names(family_tree):
         (ValueError) If name of any leaf node did not appear in base_pred.
     """
     all_node_names = np.concatenate(list(family_tree.values()))
-    all_parent_names = get_nonleaf_node_names(family_tree)
+    all_parent_names = get_parent_node_names(family_tree)
 
     all_leaf_names = [name for name in all_node_names
                       if name not in all_parent_names]
@@ -118,6 +120,91 @@ def get_leaf_ancestry(family_tree):
     return leaf_ancestry_dict
 
 
+def compute_cond_weights(X, family_tree,
+                         raw_weights_dict=None,
+                         parent_temp_dict=None,
+                         **kwargs):
+    """Computes conditional weights P(child|parent) for each child nodes.
+
+    Args:
+        X: (np.ndarray) Input features of dimension (N, D).
+        family_tree: (dict of list) A dictionary of list of strings to
+            specify the family tree between models.
+        raw_weights_dict: (dict of tf.Tensor or None) A dictionary of tf.Tensor
+            for raw weights for each child node, dimension (batch_size, n_obs,)
+            To be passed to sparse_conditional_weight().
+        parent_temp_dict: (dict of tf.Tensor or None) A dictionary of tf.Tensor
+            for temp parameter for each parent node, dimension (batch_size,)
+            To be passed to sparse_conditional_weight().
+        kwargs: Additional parameters to pass to sparse_conditional_weight.
+
+    Returns:
+        (dict of tf.Tensor) A dictionary of tf.Tensor for normalized conditional
+            weights for each child node.
+    """
+    # TODO(jereliu): consistency check for name-value correspondence in tensors
+    node_weight_dict = {}
+
+    # compute conditional weight for each child node in the tree
+    # then aggregate into a dictionary
+    for parent_name, child_names in family_tree.items():
+        # extract tensor input for sparse_conditional_weight
+        weight_raw, temp = None, None
+        if raw_weights_dict:
+            weight_raw = tf.stack([
+                raw_weights_dict[model_name] for
+                model_name in child_names], axis=-1)
+        if parent_temp_dict:
+            temp = tf.convert_to_tensor(parent_temp_dict[parent_name])
+
+        # compute conditional weight
+        child_weights = sparse_conditional_weight(X,
+                                                  parent_name=parent_name,
+                                                  child_names=child_names,
+                                                  weight_raw=weight_raw,
+                                                  temp=temp,
+                                                  **kwargs)
+
+        node_weight_dict.update(dict(zip(child_names, child_weights)))
+
+    return node_weight_dict
+
+
+def compute_leaf_weights(node_weights, family_tree, name=""):
+    """Computes the ensemble weight for leaf nodes using Tail-free Process.
+
+    Args:
+        node_weights: (dict of tf.Tensor) A dictionary containing the ensemble
+            weight (tf.Tensor of float32, dimension (batch_size, n_obs, ) )
+        family_tree: (dict of list) A dictionary of list of strings to
+            specify the family tree between models.
+        name: (str) Name of the output tensor.
+
+    Returns:
+        model_weight_tensor (tf.Tensor) A tf.Tensor of float32 specifying the ensemble weight for
+            each leaf node. Dimension (batch_size, n_obs, n_leaf_model).
+        model_names_list (list of str) A list of string listing name of leaf-node
+            models.
+    """
+    model_ancestry_dict = get_leaf_ancestry(family_tree)
+
+    # for each child, multiply weights of its ancestry
+    # TODO(jereliu): Ugly code.
+    model_names_list = []
+    model_weight_list = []
+    for model_name, ancestor_names in model_ancestry_dict.items():
+        model_names_list.append(model_name)
+        ancestor_weight_list = [
+            node_weights[ancestor_name] for ancestor_name in ancestor_names]
+        model_weight_tensor = tf.reduce_prod(
+            tf.stack(ancestor_weight_list, axis=-1), axis=-1)
+        model_weight_list.append(model_weight_tensor)
+
+    model_weight_tensor = tf.stack(model_weight_list, axis=-1, name=name)
+
+    return model_weight_tensor, model_names_list
+
+
 def check_leaf_models(family_tree, base_pred):
     """Check validity of input family tree, and return names of child models.
 
@@ -130,8 +217,10 @@ def check_leaf_models(family_tree, base_pred):
 
     Raises:
         (ValueError) If root name (_ROOT_NAME) is not found in family_tree.
+        (ValueError) If any parent node has less than two child.
         (ValueError) If name of any leaf node did not appear in base_pred.
     """
+    # TODO(jereliu): check if there's conflict in model names
     # TODO(jereliu): check if there's missing link between nodes
 
     # check root name
@@ -141,6 +230,15 @@ def check_leaf_models(family_tree, base_pred):
         raise ValueError(
             "Root node name must be '{}'. "
             "However it is not found in family_tree".format(_ROOT_NODE_NAME))
+
+    # check number of child for each parent node
+    for parent_name, child_name in family_tree.items():
+        if len(child_name) < 2:
+            raise ValueError(
+                "Number of child node of each parent must be greater than 2."
+                "However observed {} child for parent node '{}'".format(
+                    len(child_name), parent_name)
+            )
 
     # check all leaf nodes in family_tree exists in base_pred
     leaf_ancestry_dict = get_leaf_ancestry(family_tree)
@@ -157,7 +255,7 @@ def check_leaf_models(family_tree, base_pred):
 
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
-""" Model definition for Dependent Tailfree Process Prior """
+""" Model definition for Dependent Tail-free Process Prior """
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
@@ -194,38 +292,23 @@ def prior(X, base_pred, family_tree=None,
     if not family_tree:
         family_tree = {_ROOT_NODE_NAME: list(base_pred.keys())}
 
-    model_ancestry_dict = check_leaf_models(family_tree, base_pred)
+    check_leaf_models(family_tree, base_pred)
 
     # build a dictionary of conditional weights for each node in family_tree.
-    node_weight_dict = {}
-    for parent_name, child_names in family_tree.items():
-        child_weights = sparse_conditional_weight(X,
-                                                  parent_name=parent_name,
-                                                  child_names=child_names,
-                                                  kernel_func=kernel_func,
-                                                  link_func=link_func,
-                                                  ridge_factor=ridge_factor,
-                                                  **kwargs)
-        node_weight_dict.update(dict(zip(child_names, child_weights)))
+    node_weight_dict = compute_cond_weights(X, family_tree,
+                                            kernel_func=kernel_func,
+                                            link_func=link_func,
+                                            ridge_factor=ridge_factor,
+                                            **kwargs)
 
     # compute model-specific weights for each leaf node.
-    # TODO(jereliu): Ugly code.
-    model_names_list = []
-    model_weight_list = []
-    for model_name, ancestor_names in model_ancestry_dict.items():
-        model_names_list.append(model_name)
-        ancestor_weight_list = [
-            node_weight_dict[ancestor_name] for ancestor_name in ancestor_names]
-        model_weight_tensor = tf.reduce_prod(
-            tf.stack(ancestor_weight_list, axis=-1), axis=-1)
-        model_weight_list.append(model_weight_tensor)
-
-    model_weights = tf.stack(model_weight_list, axis=-1, name=name)
-
-    return model_weights, model_names_list
+    return compute_leaf_weights(node_weights=node_weight_dict,
+                                family_tree=family_tree,
+                                name=name)
 
 
 def sparse_conditional_weight(X, parent_name, child_names,
+                              weight_raw=None, temp=None,
                               kernel_func=gp.rbf,
                               link_func=sparse_softmax,
                               ridge_factor=1e-3,
@@ -242,6 +325,12 @@ def sparse_conditional_weight(X, parent_name, child_names,
         X: (np.ndarray) Input features of dimension (N, D)
         parent_name: (str) The name of the mother node.
         child_names: (list of str) A list of model names for each child in the family.
+        weight_raw: (tf.Tensor of float32 or None) base logits to be passed to
+            link_func corresponding to each child. It has dimension
+            (batch_size, num_obs, num_model).
+        temp: (tf.Tensor of float32 or None) temperature parameter corresponding
+            to the parent node to be passed to link_func, it has dimension
+            (batch_size, ).
         kernel_func: (function) kernel function for base ensemble,
             with args (X, **kwargs).
         link_func: (function) a link function that transforms the unnormalized
@@ -257,16 +346,18 @@ def sparse_conditional_weight(X, parent_name, child_names,
     num_model = len(child_names)
 
     # define random variables: temperature and raw GP weights
-    temp = ed.Normal(loc=_TEMP_PRIOR_MEAN,
-                     scale=_TEMP_PRIOR_SDEV,
-                     name='temp_{}'.format(parent_name))
+    if not isinstance(temp, tf.Tensor):
+        temp = ed.Normal(loc=_TEMP_PRIOR_MEAN,
+                         scale=_TEMP_PRIOR_SDEV,
+                         name='temp_{}'.format(parent_name))
 
-    weight_raw = tf.stack([
-        gp.prior(X, kernel_func=kernel_func,
-                 ridge_factor=ridge_factor,
-                 name='base_weight_{}'.format(model_name),
-                 **kernel_kwargs)
-        for model_name in child_names], axis=1)
+    if not isinstance(weight_raw, tf.Tensor):
+        weight_raw = tf.stack([
+            gp.prior(X, kernel_func=kernel_func,
+                     ridge_factor=ridge_factor,
+                     name='base_weight_{}'.format(model_name),
+                     **kernel_kwargs)
+            for model_name in child_names], axis=-1)
 
     # define transformed random variables
     weight_transformed = link_func(weight_raw, tf.exp(temp),
@@ -274,6 +365,6 @@ def sparse_conditional_weight(X, parent_name, child_names,
 
     # split into list then return
     # TODO(jereliu): Ugly code.
-    weight_transformed = tf.split(weight_transformed, num_model, -1)
+    weight_transformed = tf.split(weight_transformed, num_model, axis=-1)
     weight_transformed = [tf.squeeze(weight, axis=-1) for weight in weight_transformed]
     return weight_transformed
