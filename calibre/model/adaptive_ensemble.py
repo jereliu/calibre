@@ -1,10 +1,14 @@
 """Model and Sampling functions for Adaptive Ensemble using Tail-free Prior. """
 
+import functools
+
 import numpy as np
 
 import tensorflow as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
+
+import calibre.util.inference as inference_util
 
 from calibre.model import gaussian_process as gp
 from calibre.model import tailfree_process as tail_free
@@ -12,6 +16,9 @@ from calibre.model import tailfree_process as tail_free
 from calibre.util.model import sparse_softmax
 
 tfd = tfp.distributions
+
+_NOISE_PRIOR_MEAN = -5.
+_NOISE_PRIOR_SDEV = 1.
 
 
 def sparse_conditional_weight(X, base_pred, temp,
@@ -144,8 +151,8 @@ def model_flat(X, base_pred, family_tree=None, ls_weight=1., ls_resid=1., **kwar
         X, ls_resid, kernel_func=gp.rbf, name="ensemble_resid")
 
     # specify observation noise
-    sigma = ed.Normal(loc=tail_free._TEMP_PRIOR_MEAN,
-                      scale=tail_free._TEMP_PRIOR_SDEV, name="sigma")
+    sigma = ed.Normal(loc=_NOISE_PRIOR_MEAN,
+                      scale=_NOISE_PRIOR_SDEV, name="sigma")
 
     # specify observation
     y = ed.MultivariateNormalDiag(loc=ensemble_mean + ensemble_resid,
@@ -206,8 +213,8 @@ def model_tailfree(X, base_pred, family_tree=None,
         X, ls_resid, kernel_func=gp.rbf, name="ensemble_resid")
 
     # specify observation noise
-    sigma = ed.Normal(loc=tail_free._TEMP_PRIOR_MEAN,
-                      scale=tail_free._TEMP_PRIOR_SDEV, name="sigma")
+    sigma = ed.Normal(loc=_NOISE_PRIOR_MEAN,
+                      scale=_NOISE_PRIOR_SDEV, name="sigma")
 
     # specify observation
     y = ed.MultivariateNormalDiag(loc=ensemble_mean + ensemble_resid,
@@ -294,3 +301,77 @@ def sample_posterior_mean_flat(base_pred, weight_sample, temp_sample,
     f_ens_sample = tf.reduce_sum(FW_sample, axis=2, name="f_ensemble")
 
     return f_ens_sample
+
+
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+""" Variational Family """
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+
+def variational_family(X, base_pred, family_tree=None,
+                       gp_vi_family=gp.variational_mfvi,
+                       ls_weight=1., ls_resid=1., **kwargs):
+    """Defines the variational family for sparse adaptive ensemble model.
+
+    Args:
+        X: (np.ndarray) Input features of dimension (N, D)
+        base_pred: (dict of np.ndarray) A dictionary of out-of-sample prediction
+            from base models. For each item in the dictionary,
+            key is the model name, and value is the model prediction with
+            dimension (N, ).
+        gp_vi_family: (function) A variational family for node weight
+            GPs in the family tree.
+        ls_weight: (float32) lengthscale for the kernel of ensemble weight GPs.
+        ls_resid: (float32) lengthscale for the kernel of residual process GP.
+        family_tree: (dict of list or None) A dictionary of list of strings to
+            specify the family tree between models, if None then assume there's
+            no structure (i.e. flat).
+        **kwargs: Additional parameters to pass to tail_free/gp.variational_family.
+
+    Returns:
+        Collections of variational random variables/parameters:
+
+        > Random variables
+
+        temp_dict: (dict of ed.RandomVariable) Dictionary of temperature RVs
+            for each parent model.
+        weight_f_dict: (dict of ed.RandomVariable) Dictionary of GP random variables
+            for each non-root model/model family.
+        resid_f: (ed.RandomVariable) GP random variable for residual process.
+        sigma: (ed.RandomVariable) normal RV for log standard derivation of
+            observation noise.
+
+        > GP variational parameters:
+
+        weight_f_mean_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the mean of node weight GP.
+        weight_f_vcov_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the stddev or covariance matrix of node weight GP.
+        resid_f_mean: (tf.Variable) Variational parameters for the mean of residual GP.
+        resid_f_sdev: (tf.Variable) Variational parameters for the stddev/covariance matrix
+            of residual GP.
+    """
+
+    # temperature and base_weight gps
+    (temp_dict, weight_f_dict,
+     weight_mean_dict, weight_vcov_dict) = (
+        tail_free.variational_family(X, base_pred,
+                                     family_tree=family_tree,
+                                     gp_vi_family=gp_vi_family,
+                                     ls=ls_weight, **kwargs))
+
+    # residual gp
+    resid_f, resid_f_mean, resid_f_sdev = gp_vi_family(X, name='vi_ensemble_resid',
+                                                       ls=ls_resid, **kwargs)
+
+    # observation noise
+    sigma = inference_util.scalar_gaussian_vi_rv(name='sigma')
+
+    return (temp_dict, weight_f_dict, resid_f, sigma,
+            weight_mean_dict, weight_vcov_dict, resid_f_mean, resid_f_sdev)
+
+
+variational_mfvi = functools.partial(variational_family,
+                                     gp_vi_family=gp.variational_mfvi)
+variational_sgpr = functools.partial(variational_family,
+                                     gp_vi_family=gp.variational_sgpr)

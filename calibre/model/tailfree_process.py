@@ -1,4 +1,4 @@
-"""Model definitions and sampling functions for Dependent Tail-free Process.
+"""Model definition and variational family for Dependent Tail-free Process Prior.
 
 #### References
 
@@ -12,15 +12,21 @@
         _Presentation Slides_, 2011.
         https://www.eurandom.tue.nl/EURANDOM_chair/minicourseghoshal.pdf
 """
+import functools
+
 import numpy as np
 
 import tensorflow as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
 
+from calibre.util import inference as inference_util
+
 from calibre.model import gaussian_process as gp
 
 from calibre.util.model import sparse_softmax
+
+tfd = tfp.distributions
 
 _TEMP_PRIOR_MEAN = -4.
 _TEMP_PRIOR_SDEV = 1.
@@ -368,3 +374,75 @@ def sparse_conditional_weight(X, parent_name, child_names,
     weight_transformed = tf.split(weight_transformed, num_model, axis=-1)
     weight_transformed = [tf.squeeze(weight, axis=-1) for weight in weight_transformed]
     return weight_transformed
+
+
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+""" Variational Family """
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+
+def variational_family(X, base_pred, family_tree=None,
+                       gp_vi_family=gp.variational_mfvi,
+                       kernel_func=gp.rbf,
+                       ridge_factor=1e-3,
+                       **kwargs):
+    """Defines the variational family for tail-free process prior.
+
+    Args:
+        X: (np.ndarray) Input features of dimension (N, D)
+        base_pred: (dict of np.ndarray) A dictionary of out-of-sample prediction
+            from base models. For detail, see calibre.adaptive_ensemble.model.
+        family_tree: (dict of list or None) A dictionary of list of strings to
+            specify the family tree between models, if None then assume there's
+            no structure (i.e. flat structure).
+        gp_vi_family: (function) A variational family for node weight
+            GPs in the family tree.
+        kernel_func: (function) kernel function for base ensemble,
+            with args (X, **kwargs). Default to rbf.
+        link_func: (function) a link function that transforms the unnormalized
+            base ensemble weights to a K-dimension simplex. Default to sparse_softmax.
+            This function has args (logits, temp)
+        ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
+        name: (str) name of the ensemble weight node on the computation graph.
+        **kwargs: Additional parameters to pass to sparse_conditional_weight.
+
+    Returns:
+        temp_dict: (dict of ed.RandomVariable) Dictionary of temperature random variables
+            for each parent model.
+        weight_f_dict: (dict of ed.RandomVariable) Dictionary of GP random variables
+            for each non-root model/model family.
+        weight_f_mean_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the mean of GP.
+        weight_f_vcov_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the stddev or covariance matrix of GP.
+    """
+    if not family_tree:
+        family_tree = {_ROOT_NODE_NAME: list(base_pred.keys())}
+
+    check_leaf_models(family_tree, base_pred)
+
+    # define variational family for temperature.
+    temp_names = get_parent_node_names(family_tree)
+    temp_list = [inference_util.scalar_gaussian_vi_rv(name='vi_temp_{}'.format(temp_name))
+                 for temp_name in temp_names]
+    temp_dict = dict(zip(temp_names, temp_list))
+
+    # define variational family for GP.
+    base_weight_names = get_nonroot_node_names(family_tree)
+    base_weight_list = [list(gp_vi_family(X, name='vi_base_weight_{}'.format(weight_name),
+                                          kern_func=kernel_func,
+                                          ridge_factor=ridge_factor, **kwargs))
+                        for weight_name in base_weight_names]
+    base_weight_arr = np.asarray(base_weight_list).T
+
+    weight_f_dict = dict(zip(base_weight_names, base_weight_arr[0]))
+    weight_f_mean_dict = dict(zip(base_weight_names, base_weight_arr[1]))
+    weight_f_vcov_dict = dict(zip(base_weight_names, base_weight_arr[2]))
+
+    return temp_dict, weight_f_dict, weight_f_mean_dict, weight_f_vcov_dict
+
+
+variational_mfvi = functools.partial(variational_family,
+                                     gp_vi_family=gp.variational_mfvi)
+variational_sgpr = functools.partial(variational_family,
+                                     gp_vi_family=gp.variational_sgpr)
