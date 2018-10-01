@@ -154,7 +154,7 @@ ls_val = 0.1
 
 with mfvi_graph.as_default():
     # sample from variational family
-    q_f, q_sig, qf_mean, qf_sdev = gp_regression.variational_meanfield(X=X_train)
+    q_f, q_sig, qf_mean, qf_sdev = gp_regression.variational_mfvi(X=X_train)
 
     # compute the expected predictive log-likelihood
     with ed.tape() as model_tape:
@@ -203,9 +203,9 @@ with tf.Session(graph=mfvi_graph) as sess:
 
 """ 3.3. prediction & visualization """
 with tf.Session() as sess:
-    f_samples = gp_regression.variational_meanfield_sample(n_sample=10000,
-                                                           qf_mean=qf_mean_val,
-                                                           qf_sdev=qf_sdev_val)
+    f_samples = gp_regression.variational_mfvi_sample(n_sample=10000,
+                                                      qf_mean=qf_mean_val,
+                                                      qf_sdev=qf_sdev_val)
     f_samples_val = sess.run(f_samples)
 
 # still use exact posterior predictive
@@ -237,9 +237,9 @@ with sgp_graph.as_default():
 
     (q_f, q_sig, qf_mean, qf_cov,
      Sigma_pre, S, Kxx, Kxz,
-     Kzz, Kzz_inv, Kxz_Kzz_inv) = gp_regression.variational_sgp(X=X_train,
-                                                                Z=X_induce,
-                                                                ls=ls_val)
+     Kzz, Kzz_inv, Kxz_Kzz_inv) = gp_regression.variational_sgpr(X=X_train,
+                                                                 Z=X_induce,
+                                                                 ls=ls_val)
 
     # compute the expected predictive log-likelihood
     with ed.tape() as model_tape:
@@ -291,9 +291,9 @@ with tf.Session(graph=sgp_graph) as sess:
 
 """ 3.3. prediction & visualization """
 with tf.Session() as sess:
-    f_samples = gp_regression.variational_sgp_sample(n_sample=10000,
-                                                     qf_mean=qf_mean_val,
-                                                     qf_cov=qf_cov_val)
+    f_samples = gp_regression.variational_sgpr_sample(n_sample=10000,
+                                                      qf_mean=qf_mean_val,
+                                                      qf_cov=qf_cov_val)
     f_samples_val = sess.run(f_samples)
 
 # still use exact posterior predictive

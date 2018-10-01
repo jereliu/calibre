@@ -61,7 +61,7 @@ def model(X, ls=1., ridge_factor=1e-4):
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
-def variational_meanfield(X):
+def variational_mfvi(X):
     """Defines the mean-field variational family for GPR.
 
     Args:
@@ -88,7 +88,7 @@ def variational_meanfield(X):
     return q_f, q_sig, qf_mean, qf_sdev
 
 
-def variational_meanfield_sample(n_sample, qf_mean, qf_sdev):
+def variational_mfvi_sample(n_sample, qf_mean, qf_sdev):
     """Generates f samples from GPR mean-field variational family.
 
     Args:
@@ -135,7 +135,7 @@ Consequently, U can be marginalized out, such that q(F) becomes
 """
 
 
-def variational_sgp(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
+def variational_sgpr(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
     """Defines the mean-field variational family for GPR.
 
     Args:
@@ -151,6 +151,7 @@ def variational_sgp(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
     """
     Nx, Nz = X.shape[0], Z.shape[0]
 
+    # 1. Prepare constants
     # compute matrix constants
     Kxx = kern_func(X, ls=ls)
     Kxz = kern_func(X, Z, ls=ls)
@@ -164,7 +165,12 @@ def variational_sgp(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
     Kxz_Kzz_inv = tf.matmul(Kxz, Kzz_inv)
     Sigma_pre = Kxx - tf.matmul(Kxz_Kzz_chol_inv, Kxz_Kzz_chol_inv, transpose_b=True)
 
-    # define free parameters
+    # 2. Define variational parameters
+    # define mean and variance for sigma
+    q_sig_mean = tf.get_variable(shape=[], name='q_sig_mean')
+    q_sig_sdev = tf.exp(tf.get_variable(shape=[], name='q_sig_sdev'))
+
+    # define free parameters (i.e. mean and full covariance of f_latent)
     m = tf.get_variable(shape=[Nz], name='qf_m')
     s = tf.get_variable(shape=[Nz * (Nz + 1) / 2],
                         # initializer=tf.zeros_initializer(),
@@ -172,10 +178,7 @@ def variational_sgp(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
     L = fill_triangular(s, name='qf_chol')
     S = tf.matmul(L, L, transpose_b=True)
 
-    q_sig_mean = tf.get_variable(shape=[], name='q_sig_mean')
-    q_sig_sdev = tf.exp(tf.get_variable(shape=[], name='q_sig_sdev'))
-
-    # compute sparse gp variational parameter
+    # compute sparse gp variational parameter (i.e. mean and covariance of P(f_obs | f_latent))
     qf_mean = tf.tensordot(Kxz_Kzz_inv, m, [[1], [0]], name='qf_mean')
     qf_cov = (Sigma_pre +
               tf.matmul(Kxz_Kzz_inv,
@@ -194,7 +197,7 @@ def variational_sgp(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
             Sigma_pre, S, Kxx, Kxz, Kzz, Kzz_inv, Kxz_Kzz_inv)
 
 
-def variational_sgp_sample(n_sample, qf_mean, qf_cov):
+def variational_sgpr_sample(n_sample, qf_mean, qf_cov):
     """Generates f samples from GPR mean-field variational family.
 
     Args:
