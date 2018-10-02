@@ -30,7 +30,11 @@ tfd = tfp.distributions
 
 _TEMP_PRIOR_MEAN = -4.
 _TEMP_PRIOR_SDEV = 1.
-_ROOT_NODE_NAME = "root"
+
+ROOT_NODE_DEFAULT_NAME = "root"
+BASE_WEIGHT_NAME_PREFIX = "base_weight"
+COND_WEIGHT_NAME_PREFIX = "conditional_weight"
+TEMP_NAME_PREFIX = "temp"
 
 # TODO(jereliu): add option to force binary tree.
 
@@ -117,7 +121,7 @@ def get_leaf_ancestry(family_tree):
         while True:
             child_name = ancestry_list[-1]
             parent_name = parent_name_dict[child_name]
-            if parent_name == _ROOT_NODE_NAME:
+            if parent_name == ROOT_NODE_DEFAULT_NAME:
                 break
             ancestry_list.append(parent_name)
 
@@ -167,7 +171,7 @@ def compute_cond_weights(X, family_tree,
         child_weights = sparse_conditional_weight(X,
                                                   parent_name=parent_name,
                                                   child_names=child_names,
-                                                  weight_raw=weight_raw,
+                                                  base_weights=weight_raw,
                                                   temp=temp,
                                                   **kwargs)
 
@@ -231,11 +235,11 @@ def check_leaf_models(family_tree, base_pred):
 
     # check root name
     try:
-        family_tree[_ROOT_NODE_NAME]
+        family_tree[ROOT_NODE_DEFAULT_NAME]
     except KeyError:
         raise ValueError(
             "Root node name must be '{}'. "
-            "However it is not found in family_tree".format(_ROOT_NODE_NAME))
+            "However it is not found in family_tree".format(ROOT_NODE_DEFAULT_NAME))
 
     # check number of child for each parent node
     for parent_name, child_name in family_tree.items():
@@ -296,7 +300,7 @@ def prior(X, base_pred, family_tree=None,
             the order of model_weights
     """
     if not family_tree:
-        family_tree = {_ROOT_NODE_NAME: list(base_pred.keys())}
+        family_tree = {ROOT_NODE_DEFAULT_NAME: list(base_pred.keys())}
 
     check_leaf_models(family_tree, base_pred)
 
@@ -314,7 +318,7 @@ def prior(X, base_pred, family_tree=None,
 
 
 def sparse_conditional_weight(X, parent_name, child_names,
-                              weight_raw=None, temp=None,
+                              base_weights=None, temp=None,
                               kernel_func=gp.rbf,
                               link_func=sparse_softmax,
                               ridge_factor=1e-3,
@@ -331,7 +335,7 @@ def sparse_conditional_weight(X, parent_name, child_names,
         X: (np.ndarray) Input features of dimension (N, D)
         parent_name: (str) The name of the mother node.
         child_names: (list of str) A list of model names for each child in the family.
-        weight_raw: (tf.Tensor of float32 or None) base logits to be passed to
+        base_weights: (tf.Tensor of float32 or None) base logits to be passed to
             link_func corresponding to each child. It has dimension
             (batch_size, num_obs, num_model).
         temp: (tf.Tensor of float32 or None) temperature parameter corresponding
@@ -355,19 +359,19 @@ def sparse_conditional_weight(X, parent_name, child_names,
     if not isinstance(temp, tf.Tensor):
         temp = ed.Normal(loc=_TEMP_PRIOR_MEAN,
                          scale=_TEMP_PRIOR_SDEV,
-                         name='temp_{}'.format(parent_name))
+                         name='{}_{}'.format(TEMP_NAME_PREFIX, parent_name))
 
-    if not isinstance(weight_raw, tf.Tensor):
-        weight_raw = tf.stack([
+    if not isinstance(base_weights, tf.Tensor):
+        base_weights = tf.stack([
             gp.prior(X, kernel_func=kernel_func,
                      ridge_factor=ridge_factor,
-                     name='base_weight_{}'.format(model_name),
+                     name='{}_{}'.format(BASE_WEIGHT_NAME_PREFIX, model_name),
                      **kernel_kwargs)
             for model_name in child_names], axis=-1)
 
     # define transformed random variables
-    weight_transformed = link_func(weight_raw, tf.exp(temp),
-                                   name='conditional_weight_{}'.format(parent_name))
+    weight_transformed = link_func(base_weights, tf.exp(temp),
+                                   name='{}_{}'.format(COND_WEIGHT_NAME_PREFIX, parent_name))
 
     # split into list then return
     # TODO(jereliu): Ugly code.
@@ -383,8 +387,6 @@ def sparse_conditional_weight(X, parent_name, child_names,
 
 def variational_family(X, base_pred, family_tree=None,
                        gp_vi_family=gp.variational_mfvi,
-                       kernel_func=gp.rbf,
-                       ridge_factor=1e-3,
                        **kwargs):
     """Defines the variational family for tail-free process prior.
 
@@ -397,52 +399,117 @@ def variational_family(X, base_pred, family_tree=None,
             no structure (i.e. flat structure).
         gp_vi_family: (function) A variational family for node weight
             GPs in the family tree.
-        kernel_func: (function) kernel function for base ensemble,
-            with args (X, **kwargs). Default to rbf.
-        link_func: (function) a link function that transforms the unnormalized
-            base ensemble weights to a K-dimension simplex. Default to sparse_softmax.
-            This function has args (logits, temp)
-        ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
-        name: (str) name of the ensemble weight node on the computation graph.
-        **kwargs: Additional parameters to pass to sparse_conditional_weight.
+        kwargs: Additional arguments to pass to gp_vi_family.
 
     Returns:
+        weight_gp_dict: (dict of ed.RandomVariable) Dictionary of GP random variables
+            for each non-root model/model family.
         temp_dict: (dict of ed.RandomVariable) Dictionary of temperature random variables
             for each parent model.
-        weight_f_dict: (dict of ed.RandomVariable) Dictionary of GP random variables
-            for each non-root model/model family.
-        weight_f_mean_dict: (dict of tf.Variable) Dictionary of variational parameters for
+        weight_gp_mean_dict: (dict of tf.Variable) Dictionary of variational parameters for
             the mean of GP.
-        weight_f_vcov_dict: (dict of tf.Variable) Dictionary of variational parameters for
+        weight_gp_vcov_dict: (dict of tf.Variable) Dictionary of variational parameters for
             the stddev or covariance matrix of GP.
+        temp_mean_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the mean of temperatures.
+        temp_sdev_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the stddev or temperatures.
     """
     if not family_tree:
-        family_tree = {_ROOT_NODE_NAME: list(base_pred.keys())}
+        family_tree = {ROOT_NODE_DEFAULT_NAME: list(base_pred.keys())}
 
     check_leaf_models(family_tree, base_pred)
 
     # define variational family for temperature.
-    temp_names = get_parent_node_names(family_tree)
-    temp_list = [inference_util.scalar_gaussian_vi_rv(name='vi_temp_{}'.format(temp_name))
-                 for temp_name in temp_names]
-    temp_dict = dict(zip(temp_names, temp_list))
+    # TODO(jereliu): Ugly code.
+    temp_names = ['temp_{}'.format(name) for name in get_parent_node_names(family_tree)]
+    temp_list = [
+        list(inference_util.scalar_gaussian_variational(name='vi_{}'.format(temp_name)))
+        for temp_name in temp_names]
+    temp_arr = np.asarray(temp_list).T
+
+    temp_dict = dict(zip(temp_names, temp_arr[0]))
+    temp_mean_dict = dict(zip(temp_names, temp_arr[1]))
+    temp_sdev_dict = dict(zip(temp_names, temp_arr[2]))
 
     # define variational family for GP.
-    base_weight_names = get_nonroot_node_names(family_tree)
-    base_weight_list = [list(gp_vi_family(X, name='vi_base_weight_{}'.format(weight_name),
-                                          kern_func=kernel_func,
-                                          ridge_factor=ridge_factor, **kwargs))
+    # TODO(jereliu): Ugly code.
+    base_weight_names = ['base_weight_{}'.format(name)
+                         for name in get_nonroot_node_names(family_tree)]
+    base_weight_list = [list(gp_vi_family(X, name='vi_{}'.format(weight_name), **kwargs))
                         for weight_name in base_weight_names]
     base_weight_arr = np.asarray(base_weight_list).T
 
-    weight_f_dict = dict(zip(base_weight_names, base_weight_arr[0]))
-    weight_f_mean_dict = dict(zip(base_weight_names, base_weight_arr[1]))
-    weight_f_vcov_dict = dict(zip(base_weight_names, base_weight_arr[2]))
+    weight_gp_dict = dict(zip(base_weight_names, base_weight_arr[0]))
+    weight_gp_mean_dict = dict(zip(base_weight_names, base_weight_arr[1]))
+    weight_gp_vcov_dict = dict(zip(base_weight_names, base_weight_arr[2]))
 
-    return temp_dict, weight_f_dict, weight_f_mean_dict, weight_f_vcov_dict
+    return (weight_gp_dict, temp_dict,
+            weight_gp_mean_dict, weight_gp_vcov_dict,
+            temp_mean_dict, temp_sdev_dict)
+
+
+def variational_family_sample(n_sample,
+                              weight_gp_mean_dict, weight_gp_vcov_dict,
+                              temp_mean_dict, temp_sdev_dict,
+                              gp_sample_func=gp.variational_mfvi_sample):
+    """Samples from the variational family for tail-free process prior.
+
+    Args:
+        n_sample: (int) Number of samples to draw from variational family.
+        weight_gp_mean_dict: (dict of tf.Variable) Dictionary of variational parameters
+            for the mean of GP.
+        weight_gp_vcov_dict: (dict of tf.Variable) Dictionary of variational parameters
+            for the stddev or covariance matrix of GP.
+        temp_mean_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the mean of temperatures.
+        temp_sdev_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the stddev or temperatures.
+        gp_sample_func: (function) Sampling function for GP weights from
+            calibre.model.gaussian_process.
+
+    Returns:
+        weight_gp_sample_dict: (dict of tf.Tensor) Dictionary of temperature random
+            variables for each parent model.
+        temp_sample_dict: (dict of tf.Tensor) Dictionary of GP random variables
+            for each non-root model/model family.
+
+    Raises:
+        (ValueError) If key names are different for weight_gp_mean_dict and weight_gp_vcov_dict.
+        (ValueError) If key names are different for temp_mean_dict and temp_sdev_dict.
+    """
+    if not set(weight_gp_mean_dict.keys()) == set(weight_gp_vcov_dict.keys()):
+        raise ValueError("Key values for 'weight_gp_mean_dict' and 'weight_gp_vcov_dict' should be identical.")
+
+    if not set(temp_mean_dict.keys()) == set(temp_sdev_dict.keys()):
+        raise ValueError("Key values for 'temp_mean_dict' and 'temp_sdev_dict' should be identical.")
+
+    # sample raw weight gp
+    weight_gp_sample_dict = dict()
+    for model_names in weight_gp_mean_dict.keys():
+        weight_gp_sample_dict[model_names] = gp_sample_func(
+            n_sample,
+            weight_gp_mean_dict[model_names],
+            weight_gp_vcov_dict[model_names])
+
+    # sample temperature.
+    temp_sample_dict = dict()
+    for model_names in temp_mean_dict.keys():
+        temp_sample_dict[model_names] = (
+            inference_util.scalar_gaussian_variational_sample(
+                n_sample,
+                temp_mean_dict[model_names],
+                temp_sdev_dict[model_names]))
+
+    return weight_gp_sample_dict, temp_sample_dict
 
 
 variational_mfvi = functools.partial(variational_family,
                                      gp_vi_family=gp.variational_mfvi)
 variational_sgpr = functools.partial(variational_family,
                                      gp_vi_family=gp.variational_sgpr)
+
+variational_mfvi_sample = functools.partial(variational_family_sample,
+                                            gp_sample_func=gp.variational_mfvi_sample)
+variational_sgpr_sample = functools.partial(variational_family_sample,
+                                            gp_sample_func=gp.variational_sgpr_sample)

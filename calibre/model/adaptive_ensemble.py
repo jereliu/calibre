@@ -28,12 +28,12 @@ def sparse_conditional_weight(X, base_pred, temp,
                               ridge_factor=1e-3,
                               name="ensemble_weight",
                               **kwargs):
-    """Defines the nonparametric (tail-free process) prior for p(model, feature).
+    r"""Defines the nonparametric (tail-free process) prior for p(model, feature).
 
     Defines the conditional distribution of model given feature as:
 
-        w(model | x ) = link_func( w_model(x) )
-        w_model(x) ~ gaussian_process[0, k_w(x)]
+        w( model | x ) = link_func( w_raw(x) )
+        w_raw(x) ~ gaussian_process[0, k_w(x)]
 
     Notes:
         For K models, only K-1 gp priors will be created, such that the output
@@ -67,7 +67,6 @@ def sparse_conditional_weight(X, base_pred, temp,
     if family_tree:
         raise NotImplementedError
 
-    # TODO(jereliu): execute below operations by family group.
     # specify un-normalized GP weights
     base_names = list(base_pred.keys())
 
@@ -81,9 +80,6 @@ def sparse_conditional_weight(X, base_pred, temp,
     # specify normalized GP weights by family group
     W_model = link_func(W_raw, tf.exp(temp), name=name)
 
-    # TODO(jereliu): specify model-specific weights using tail-free construction.
-    # W_model = W_cond
-
     return W_model
 
 
@@ -93,10 +89,10 @@ def sparse_conditional_weight(X, base_pred, temp,
 
 
 def model_flat(X, base_pred, family_tree=None, ls_weight=1., ls_resid=1., **kwargs):
-    """Defines the sparse adaptive ensemble model.
+    r"""Defines the sparse adaptive ensemble model.
 
-        y           ~   N(f, \sigma^2)
-        f(x)        ~   gaussian_process(\sum f_model(x) * w_model(x), k_resid(x))
+        y           ~   N(f, sigma^2)
+        f(x)        ~   gaussian_process(sum{ f_model(x) * w_model(x) }, k_resid(x))
         w_model     =   tail_free_process(w0_model)
         w0_model(x) ~   gaussian_process(0, k_w(x))
 
@@ -163,10 +159,10 @@ def model_flat(X, base_pred, family_tree=None, ls_weight=1., ls_resid=1., **kwar
 
 def model_tailfree(X, base_pred, family_tree=None,
                    ls_weight=1., ls_resid=1., **kwargs):
-    """Defines the sparse adaptive ensemble model.
+    r"""Defines the sparse adaptive ensemble model.
 
-        y           ~   N(f, \sigma^2)
-        f(x)        ~   gaussian_process(\sum f_model(x) * w_model(x), k_resid(x))
+        y           ~   N(f, sigma^2)
+        f(x)        ~   gaussian_process(sum{ f_model(x) * w_model(x) }, k_resid(x))
         w_model     =   tail_free_process(w0_model)
         w0_model(x) ~   gaussian_process(0, k_w(x))
 
@@ -303,6 +299,81 @@ def sample_posterior_mean_flat(base_pred, weight_sample, temp_sample,
     return f_ens_sample
 
 
+def sample_posterior_tailfree(X, base_pred_dict, family_tree,
+                              weight_gp_dict, temp_dict, resid_gp_sample,
+                              kernel_func=gp.rbf, ls_weight=1.,
+                              link_func=sparse_softmax,
+                              ridge_factor=1e-3):
+    """Obtain Samples from the posterior mean and posterior predictive.
+
+    Args:
+        X: (np.ndarray) Input features of dimension (N, D) corresponding to base_pred_dict.
+        base_pred: (dict of np.ndarray) A dictionary of out-of-sample prediction
+            from base models.
+        family_tree: (dict of list or None) A dictionary of list of strings to
+            specify the family tree between models, if None then assume there's
+            no structure (i.e. flat structure).
+        weight_gp_dict: (dict of np.ndarray) Dictionary of samples of raw weights
+            for each non-root model/model family.
+        temp_dict: (dict of np.ndarray) Dictionary of temperature random variables
+            for each parent model.
+        resid_gp_sample: (np.ndarray) GP samples for residual process corresponding to X.
+        kernel_func: (function) kernel function for base ensemble,
+            with args (X, **kwargs).
+        ls_weight: (float32) lengthscale for the kernel of ensemble weight GPs.
+        link_func: (function) a link function that transforms the unnormalized
+            base ensemble weights to a K-dimension simplex.
+        ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
+
+    Returns:
+        ensemble_sample: (np.ndarray) Samples from full posterior predictive.
+        ensemble_mean: (np.ndarray) Samples from posterior mean.
+        ensemble_weights: (np.ndarray) Samples of leaf model weights.
+        cond_weights_dict: (dict of np.ndarray) Dictionary of conditional weights
+            for each non-root node.
+        ensemble_model_names: (list of str) Names of the leaf models corresponding to
+            ensemble_weights.
+    """
+    eval_graph = tf.Graph()
+    with eval_graph.as_default():
+        cond_weight_tensors_dict = (
+            tail_free.compute_cond_weights(X,
+                                           family_tree=family_tree,
+                                           raw_weights_dict=weight_gp_dict,
+                                           parent_temp_dict=temp_dict,
+                                           kernel_func=kernel_func,
+                                           link_func=link_func,
+                                           ridge_factor=ridge_factor,
+                                           ls=ls_weight))
+
+        ensemble_weight_tensors, ensemble_model_names = (
+            tail_free.compute_leaf_weights(node_weights=cond_weight_tensors_dict,
+                                           family_tree=family_tree,
+                                           name='ensemble_weight')
+        )
+
+        base_model_pred = np.asarray(
+            [base_pred_dict[model_name] for model_name in ensemble_model_names]).T
+
+        FW = tf.multiply(base_model_pred, ensemble_weight_tensors)
+        ensemble_mean_tensor = tf.reduce_sum(FW, axis=-1, name="ensemble_mean")
+
+        eval_graph.finalize()
+
+    with tf.Session(graph=eval_graph) as sess:
+        (ensemble_mean,
+         ensemble_weights,
+         cond_weights_dict) = sess.run([ensemble_mean_tensor,
+                                        ensemble_weight_tensors,
+                                        cond_weight_tensors_dict])
+
+        # compute sample for full posterior
+        ensemble_sample = ensemble_mean + resid_gp_sample
+
+    return (ensemble_sample, ensemble_mean,
+            ensemble_weights, cond_weights_dict, ensemble_model_names)
+
+
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 """ Variational Family """
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -343,35 +414,103 @@ def variational_family(X, base_pred, family_tree=None,
 
         > GP variational parameters:
 
-        weight_f_mean_dict: (dict of tf.Variable) Dictionary of variational parameters for
+        weight_gp_mean_dict: (dict of tf.Variable) Dictionary of variational parameters for
             the mean of node weight GP.
-        weight_f_vcov_dict: (dict of tf.Variable) Dictionary of variational parameters for
+        weight_gp_vcov_dict: (dict of tf.Variable) Dictionary of variational parameters for
             the stddev or covariance matrix of node weight GP.
-        resid_f_mean: (tf.Variable) Variational parameters for the mean of residual GP.
-        resid_f_sdev: (tf.Variable) Variational parameters for the stddev/covariance matrix
-            of residual GP.
+        resid_gp_mean_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the mean of residual GP.
+        resid_gp_vcov_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the stddev or covariance matrix of residual GP.
+        temp_mean_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the mean of temperature parameters.
+        temp_sdev_dict: (dict of tf.Variable) Dictionary of variational parameters for
+            the stddev of temperature parameters.
+        sigma_mean: (tf.Variable) Variational parameters for the mean of obs noise.
+        sigma_sdev: (tf.Variable) Variational parameters for the stddev of obs noise.
     """
 
     # temperature and base_weight gps
-    (temp_dict, weight_f_dict,
-     weight_mean_dict, weight_vcov_dict) = (
+    (weight_gp_dict, temp_dict,
+     weight_gp_mean_dict, weight_gp_vcov_dict,
+     temp_mean_dict, temp_sdev_dict,) = (
         tail_free.variational_family(X, base_pred,
                                      family_tree=family_tree,
                                      gp_vi_family=gp_vi_family,
                                      ls=ls_weight, **kwargs))
 
     # residual gp
-    resid_f, resid_f_mean, resid_f_sdev = gp_vi_family(X, name='vi_ensemble_resid',
-                                                       ls=ls_resid, **kwargs)
+    resid_gp, resid_gp_mean, resid_gp_vcov = gp_vi_family(X, ls=ls_resid,
+                                                          name='vi_ensemble_resid',
+                                                          **kwargs)
 
     # observation noise
-    sigma = inference_util.scalar_gaussian_vi_rv(name='sigma')
+    sigma, sigma_mean, sigma_sdev = inference_util.scalar_gaussian_variational(name='sigma')
 
-    return (temp_dict, weight_f_dict, resid_f, sigma,
-            weight_mean_dict, weight_vcov_dict, resid_f_mean, resid_f_sdev)
+    return (weight_gp_dict, resid_gp, temp_dict, sigma,  # variational RVs
+            weight_gp_mean_dict, weight_gp_vcov_dict,  # weight GP variational parameters
+            resid_gp_mean, resid_gp_vcov,  # resid GP variational parameters
+            temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
+            sigma_mean, sigma_sdev  # obs noise variational parameters
+            )
+
+
+def variational_family_sample(n_sample,
+                              weight_gp_mean_dict, weight_gp_vcov_dict,
+                              temp_mean_dict, temp_sdev_dict,
+                              resid_gp_mean, resid_gp_vcov,
+                              sigma_mean, sigma_sdev,
+                              gp_sample_func=gp.variational_mfvi_sample):
+    """Samples from the variational family for adaptive ensemble.
+
+    Args:
+        n_sample: (int) Number of samples to draw from variational family.
+        weight_gp_mean_dict: (dict of np.ndarray) Dictionary of variational parameters for
+            the mean of node weight GP.
+        weight_gp_vcov_dict: (dict of np.ndarray) Dictionary of variational parameters for
+            the stddev or covariance matrix of node weight GP.
+        temp_mean_dict: (dict of np.ndarray) Dictionary of variational parameters for
+            the mean of temperature parameters.
+        temp_sdev_dict: (dict of np.ndarray) Dictionary of variational parameters for
+            the stddev of temperature parameters.
+        resid_gp_mean: (np.ndarray of float32) Dictionary of variational parameters for
+            the mean of residual GP.
+        resid_gp_vcov: (np.ndarray of float32) Dictionary of variational parameters for
+            the stddev or covariance matrix of residual GP.
+        sigma_mean: (float32) Variational parameters for the mean of obs noise.
+        sigma_sdev: (float32) Variational parameters for the stddev of obs noise.
+        gp_sample_func: (function): Sampling function for Gaussian Process variational family.
+
+    Returns:
+        weight_gp_sample_dict: (dict of tf.Tensor) Dictionary of temperature random variables
+            for each parent model.
+        temp_sample_dict: (dict of tf.Tensor) Dictionary of GP samples of raw weights
+            for each non-root model/model family.
+        resid_gp_sample: (tf.Tensor) GP samples for residual process.
+        sigma_sample: (tf.Tensor) Samples of observation noise.
+    """
+    # sample model weight gp and temperature.
+    weight_gp_sample_dict, temp_sample_dict = (
+        tail_free.variational_family_sample(n_sample,
+                                            weight_gp_mean_dict, weight_gp_vcov_dict,
+                                            temp_mean_dict, temp_sdev_dict,
+                                            gp_sample_func=gp_sample_func))
+    # sample residual process gp
+    resid_gp_sample = gp_sample_func(n_sample, resid_gp_mean, resid_gp_vcov)
+
+    # sample observational noise
+    sigma_sample = inference_util.scalar_gaussian_variational_sample(
+        n_sample, sigma_mean, sigma_sdev)
+
+    return weight_gp_sample_dict, temp_sample_dict, resid_gp_sample, sigma_sample
 
 
 variational_mfvi = functools.partial(variational_family,
                                      gp_vi_family=gp.variational_mfvi)
 variational_sgpr = functools.partial(variational_family,
                                      gp_vi_family=gp.variational_sgpr)
+
+variational_mfvi_sample = functools.partial(variational_family_sample,
+                                            gp_sample_func=gp.variational_mfvi_sample)
+variational_sgpr_sample = functools.partial(variational_family_sample,
+                                            gp_sample_func=gp.variational_sgpr_sample)
