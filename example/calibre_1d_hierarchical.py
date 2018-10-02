@@ -337,6 +337,26 @@ with open(os.path.join(_SAVE_ADDR_PREFIX,
     pk.dump(ensemble_weight_corr, file, protocol=pk.HIGHEST_PROTOCOL)
 
 """ 2.3.2. visualize: base prediction """
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       'ensemble_posterior_mean_sample.pkl'), 'rb') as file:
+    ensemble_mean_val = pk.load(file)
+
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       'ensemble_posterior_dist_sample.pkl'), 'rb') as file:
+    ensemble_sample_val = pk.load(file)
+
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       'ensemble_posterior_node_weight_dict.pkl'), 'rb') as file:
+    cond_weights_dict_val = pk.load(file)
+
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       'ensemble_posterior_model_weights.pkl'), 'rb') as file:
+    ensemble_weights_val = pk.load(file)
+
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       'ensemble_posterior_model_weights_corr.pkl'), 'rb') as file:
+    ensemble_weight_corr = pk.load(file)
+
 base_pred_dict = {key: value for key, value in base_valid_pred.items()
                   if key in ensemble_model_names}
 
@@ -377,6 +397,15 @@ visual_util.gpr_1d_visual(posterior_mean_median,
                                                  "ensemble_hmc_posterior_mean_quantile.png")
                           )
 
+visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                          pred_samples=list(ensemble_mean_val)[:2500],
+                          X_train=X_test, y_train=y_test,
+                          X_test=X_valid, y_test=y_valid,
+                          title="Ensemble Posterior Samples, Hamilton MC",
+                          save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                 "ensemble_hmc_posterior_sample.png")
+                          )
+
 """ 2.3.4. visualize: ensemble residual """
 
 posterior_resid_mu = np.nanmean(ensemble_resid_valid_sample, axis=0)
@@ -406,6 +435,15 @@ visual_util.gpr_1d_visual(posterior_resid_median,
                           title="Ensemble Posterior Residual Quantiles, Hamilton MC",
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "ensemble_hmc_posterior_resid_quantile.png")
+                          )
+
+visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                          pred_samples=list(ensemble_resid_valid_sample)[:2500],
+                          X_train=X_test, y_train=y_test,
+                          X_test=X_valid, y_test=y_valid,
+                          title="Ensemble Posterior Residual Samples, Hamilton MC",
+                          save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                 "ensemble_hmc_posterior_resid_sample.png")
                           )
 
 """ 2.3.5. visualize: ensemble posterior full """
@@ -438,6 +476,15 @@ visual_util.gpr_1d_visual(posterior_dist_median,
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "ensemble_hmc_posterior_full_quantile.png")
                           )
+visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                          pred_samples=list(ensemble_sample_val)[:2500],
+                          X_train=X_test, y_train=y_test,
+                          X_test=X_valid, y_test=y_valid,
+                          title="Ensemble Posterior Predictive Samples, Hamilton MC",
+                          save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                 "ensemble_hmc_posterior_full_sample.png")
+                          )
+
 
 """ 2.3.6. visualize: ensemble posterior reliability """
 

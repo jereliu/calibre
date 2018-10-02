@@ -12,6 +12,7 @@ import calibre.util.evaluation as eval_util
 
 def gpr_1d_visual(pred_mean,
                   pred_cov=None, pred_quantiles=[],
+                  pred_samples=None,
                   X_train=None, y_train=None, X_test=None, y_test=None,
                   X_induce=None, title="", save_addr=""):
     """Plots the GP posterior predictive mean and uncertainty.
@@ -22,6 +23,7 @@ def gpr_1d_visual(pred_mean,
         pred_quantiles: (list of tuples) list of tuples of (upper, lower)
             of np.ndarrays for the predictive quantiles.
             Ignored if pred_cov is not None.
+        pred_samples: (list of np.ndarray) list of np.ndarray of samples from posterior.
         X_train: (np.ndarray) X values in training dataset.
         y_train: (np.ndarray) y values in training dataset.
         X_test: (np.ndarray) X values in test dataset.
@@ -34,18 +36,13 @@ def gpr_1d_visual(pred_mean,
         plt.ioff()
 
     fig, ax = plt.subplots()
-    if isinstance(X_test, np.ndarray):
-        ax.plot(X_test.squeeze(), y_test.squeeze(), c='black')
-    if isinstance(X_train, np.ndarray):
-        ax.plot(X_train.squeeze(), y_train.squeeze(), 'o', c='red',
-                markeredgecolor='black')
-    if isinstance(X_induce, np.ndarray):
-        for x_vertical in X_induce:
-            plt.axvline(x=x_vertical, c='black', alpha=.2)
 
-    # plot posterior predictive
-    ax.plot(X_test, pred_mean, c='blue', alpha=.5)
+    # plot predictions:
+    # posterior predictive
+    if isinstance(pred_mean, np.ndarray):
+        ax.plot(X_test, pred_mean, c='blue', alpha=.5)
 
+    # posterior confidence interval based on std
     if isinstance(pred_cov, np.ndarray):
         # compute the three sets of predictive quantiles (mean +\- 3*sd)
         pred_quantiles = [(pred_mean + np.sqrt(pred_cov),
@@ -55,10 +52,28 @@ def gpr_1d_visual(pred_mean,
                           (pred_mean + 3 * np.sqrt(pred_cov),
                            pred_mean - 3 * np.sqrt(pred_cov))]
 
+    # posterior quantile
     if isinstance(pred_quantiles, list):
         for upper, lower in pred_quantiles:
             ax.fill_between(X_test.squeeze(), upper, lower,
                             color='black', alpha=.1, edgecolor=None, linewidth=0.0)
+
+    # posterior samples
+    if isinstance(pred_samples, list):
+        for pred_sample in pred_samples:
+            ax.plot(X_test.squeeze(), pred_sample,
+                            color='teal', alpha=.01, linewidth=2.0)
+
+    # plot ground truth
+    if isinstance(X_test, np.ndarray):
+        ax.plot(X_test.squeeze(), y_test.squeeze(), c='black')
+    if isinstance(X_train, np.ndarray):
+        ax.plot(X_train.squeeze(), y_train.squeeze(), 'o', c='red',
+                markeredgecolor='black')
+    if isinstance(X_induce, np.ndarray):
+        for x_vertical in X_induce:
+            plt.axvline(x=x_vertical, c='black', alpha=.2)
+
 
     plt.title(title)
     plt.ylim([-4.5, 4.5])
