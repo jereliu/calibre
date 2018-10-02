@@ -133,7 +133,7 @@ with tf.Session(graph=mcmc_graph) as sess:
 # prediction
 f_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
                                       f_sample=f_samples_val.T,
-                                      ls=ls_val, kern_func=gp.rbf)
+                                      ls=ls_val, kernel_func=gp.rbf)
 
 # visualize
 mu = np.mean(f_test_val, axis=1)
@@ -211,7 +211,7 @@ with tf.Session() as sess:
 # still use exact posterior predictive
 f_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
                                       f_sample=f_samples_val.T,
-                                      ls=ls_val, kern_func=gp.rbf)
+                                      ls=ls_val, kernel_func=gp.rbf)
 
 # visualize
 mu = np.mean(f_test_val, axis=1)
@@ -299,7 +299,7 @@ with tf.Session() as sess:
 # still use exact posterior predictive
 f_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
                                       f_sample=f_samples_val.T,
-                                      ls=ls_val, kern_func=gp.rbf)
+                                      ls=ls_val, kernel_func=gp.rbf)
 
 # visualize
 mu = np.mean(f_test_val, axis=1)

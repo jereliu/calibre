@@ -219,13 +219,13 @@ for model_weight_sample in weight_sample_val:
     model_weight_valid_sample.append(
         gp.sample_posterior_full(X_new=X_valid, X=X_test,
                                  f_sample=model_weight_sample.T,
-                                 ls=DEFAULT_LS_WEIGHT, kern_func=gp.rbf).T.astype(np.float32)
+                                 ls=DEFAULT_LS_WEIGHT, kernel_func=gp.rbf).T.astype(np.float32)
     )
 
 ensemble_resid_valid_sample = gp.sample_posterior_full(
     X_new=X_valid, X=X_test,
     f_sample=resid_sample_val.T,
-    ls=DEFAULT_LS_RESID, kern_func=gp.rbf).T
+    ls=DEFAULT_LS_RESID, kernel_func=gp.rbf).T
 
 # compute sample for posterior mean
 with tf.Session() as sess:
@@ -346,6 +346,5 @@ for i in range(ensemble_weight_corr.shape[0]):
                                "model composition/{}.png".format(i)))
 
 """""""""""""""""""""""""""""""""
-# 3. PSR Augmented VI
+# 3. Variational Inference
 """""""""""""""""""""""""""""""""
-# TODO(jereliu): to implement

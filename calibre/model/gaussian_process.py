@@ -141,7 +141,7 @@ def sample_posterior_mean(X_new, X, f_sample, ls, kern_func=rbf, ridge_factor=1e
     return tf.matmul(Kx, K_inv_f, transpose_a=True)
 
 
-def sample_posterior_full(X_new, X, f_sample, ls, kern_func=rbf, ridge_factor=1e-3):
+def sample_posterior_full(X_new, X, f_sample, ls, kernel_func=rbf, ridge_factor=1e-3):
     """Sample posterior predictive distribution.
 
     Sample posterior conditional from f^* | f ~ MVN, where:
@@ -155,7 +155,7 @@ def sample_posterior_full(X_new, X, f_sample, ls, kern_func=rbf, ridge_factor=1e
         f_sample: (np.ndarray of float32) M samples of posterior GP sample,
             N_obs x N_sample
         ls: (float) training lengthscale
-        kern_func: (function) kernel function.
+        kernel_func: (function) kernel function.
         ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition.
     Returns:
          (np.ndarray of float32) N_new x M vectors of posterior predictive mean samples
@@ -164,9 +164,9 @@ def sample_posterior_full(X_new, X, f_sample, ls, kern_func=rbf, ridge_factor=1e
     N, M = f_sample.shape
 
     # compute basic components
-    Kxx = kern_func(X_new, X_new, ls=ls)
-    Kx = kern_func(X, X_new, ls=ls)
-    K = kern_func(X, ls=ls, ridge_factor=ridge_factor)
+    Kxx = kernel_func(X_new, X_new, ls=ls)
+    Kx = kernel_func(X, X_new, ls=ls)
+    K = kernel_func(X, ls=ls, ridge_factor=ridge_factor)
     K_inv = tf.matrix_inverse(K)
 
     # compute conditional mean and variance.
@@ -208,7 +208,8 @@ def variational_mfvi(X, name, **kwargs):
     qf_sdev = tf.exp(tf.get_variable(shape=[N], name='{}_sdev'.format(name)))
 
     # define variational family
-    q_f = ed.MultivariateNormalDiag(loc=qf_mean, scale_diag=qf_sdev,
+    q_f = ed.MultivariateNormalDiag(loc=qf_mean,
+                                    scale_diag=qf_sdev,
                                     name=name)
 
     return q_f, qf_mean, qf_sdev
@@ -227,7 +228,8 @@ def variational_mfvi_sample(n_sample, qf_mean, qf_sdev):
     """
 
     """Generates f samples from GPR mean-field variational family."""
-    q_f = tfd.MultivariateNormalDiag(loc=qf_mean, scale_diag=qf_sdev,
+    q_f = tfd.MultivariateNormalDiag(loc=qf_mean,
+                                     scale_diag=qf_sdev,
                                      name='q_f')
     return q_f.sample(n_sample)
 
@@ -259,14 +261,14 @@ Consequently, U can be marginalized out, such that q(F) becomes
 """
 
 
-def variational_sgpr(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3, name=""):
+def variational_sgpr(X, Z, ls=1., kernel_func=rbf, ridge_factor=1e-3, name=""):
     """Defines the mean-field variational family for GPR.
 
     Args:
         X: (np.ndarray of float32) input training features, with dimension (Nx, D).
         Z: (np.ndarray of float32) inducing points, with dimension (Nz, D).
         ls: (float32) length scale parameter.
-        kern_func: (function) kernel function.
+        kernel_func: (function) kernel function.
         ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition
         name: (str) name for the variational parameter/random variables.
 
@@ -278,9 +280,9 @@ def variational_sgpr(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3, name=""):
 
     # 1. Prepare constants
     # compute matrix constants
-    Kxx = kern_func(X, ls=ls)
-    Kxz = kern_func(X, Z, ls=ls)
-    Kzz = kern_func(Z, ls=ls, ridge_factor=ridge_factor)
+    Kxx = kernel_func(X, ls=ls)
+    Kxz = kernel_func(X, Z, ls=ls)
+    Kzz = kernel_func(Z, ls=ls, ridge_factor=ridge_factor)
 
     # compute null covariance matrix using Cholesky decomposition
     Kzz_chol_inv = tf.matrix_inverse(tf.cholesky(Kzz))
@@ -292,11 +294,10 @@ def variational_sgpr(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3, name=""):
 
     # 2. Define variational parameters
     # define free parameters (i.e. mean and full covariance of f_latent)
-    m = tf.get_variable(shape=[Nz], name='qf_m')
-    s = tf.get_variable(shape=[Nz * (Nz + 1) / 2],
-                        name='qf_s')
-    L = fill_triangular(s, name='qf_chol')
-    S = tf.matmul(L, L, transpose_b=True)
+    m = tf.get_variable(shape=[Nz], name='{}_mean_latent'.format(name))
+    s = tf.get_variable(shape=[Nz * (Nz + 1) / 2], name='{}_cov_latent_s'.format(name))
+    L = fill_triangular(s, name='{}_cov_latent_chol'.format(name))
+    S = tf.matmul(L, L, transpose_b=True, name='{}_cov_latent'.format(name))
 
     # compute sparse gp variational parameter
     # (i.e. mean and covariance of P(f_obs | f_latent))
@@ -330,6 +331,5 @@ def variational_sgpr_sample(n_sample, qf_mean, qf_cov):
 
     """Generates f samples from GPR mean-field variational family."""
     q_f = tfd.MultivariateNormalFullCovariance(loc=qf_mean,
-                                               covariance_matrix=qf_cov,
-                                               name='q_f')
+                                               covariance_matrix=qf_cov)
     return q_f.sample(n_sample)
