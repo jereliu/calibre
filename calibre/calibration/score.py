@@ -9,6 +9,10 @@
         _Mon. Weather Rev. 125: 1312–1327_. 1997.
 [3]:    Daniel S. Wilks. Enforcing calibration in ensemble postprocessing.
         _Quarterly Journal of the Royal Meteorological Society, 144(710), 76-84_. 2018
+[4]:    Gneiting, T., Raftery, A.E.: Strictly proper scoring rules, prediction, and estimation.
+        _J. Am. Stat. Assoc. 102, 359–378_. 2007.
+[5]:    Gneiting, T., Balabdaoui, F., and Raftery, A. E. Probabilistic Forecasts,
+        Calibration and Sharpness, _Journal of the Royal Statistical Society,Ser.B_. 2007.
 """
 import functools
 
@@ -27,7 +31,7 @@ def calibration_score(Y_sample, Y_obs, n_cdf_eval=500):
     Denote f = F^{-1}(y_obs) the inverse CDF of posterior predictive evaluated at y_obs.
     If y_obs ~ F (i.e. probabilistically calibrated), then f should be
         uniformly distributed, and P(f < x) = x.
-    The metric computed here is the Total Variation Distance
+    The calibration computed here is the Total Variation Distance
         (i.e. absolute difference) between P(F^{-1}(y_obs)<x) v.s. x.
 
     Args:
