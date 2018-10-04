@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-import calibre.util.evaluation as eval_util
+import calibre.util.metric as metric_util
 
 
 def gpr_1d_visual(pred_mean,
@@ -31,19 +31,28 @@ def gpr_1d_visual(pred_mean,
         X_induce: (np.ndarray)  X values marking the position of inducing points.
         title: (str) Title of the image.
         save_addr: (str) Address to save image to.
+
+    Raises:
+        (ValueError) If y_test is not multiple of X_test.
     """
+    # TODO(jereliu): Write a save function decorator.
     if save_addr:
         plt.ioff()
 
     fig, ax = plt.subplots()
 
     # plot predictions:
+    X_test = np.unique(X_test, axis=0)
+
     # posterior predictive
     if isinstance(pred_mean, np.ndarray):
-        ax.plot(X_test, pred_mean, c='blue', alpha=.5)
+        pred_mean = pred_mean.squeeze()[:len(X_test)]
+        ax.plot(X_test.squeeze(), pred_mean.squeeze(),
+                c='blue', alpha=.5)
 
     # posterior confidence interval based on std
     if isinstance(pred_cov, np.ndarray):
+        pred_cov = pred_cov.squeeze()[:len(X_test)]
         # compute the three sets of predictive quantiles (mean +\- 3*sd)
         pred_quantiles = [(pred_mean + np.sqrt(pred_cov),
                            pred_mean - np.sqrt(pred_cov)),
@@ -55,25 +64,37 @@ def gpr_1d_visual(pred_mean,
     # posterior quantile
     if isinstance(pred_quantiles, list):
         for upper, lower in pred_quantiles:
+            upper = upper.squeeze()[:len(X_test)]
+            lower = lower.squeeze()[:len(X_test)]
             ax.fill_between(X_test.squeeze(), upper, lower,
                             color='black', alpha=.1, edgecolor=None, linewidth=0.0)
 
     # posterior samples
     if isinstance(pred_samples, list):
         for pred_sample in pred_samples:
+            pred_sample = pred_sample.squeeze()[:len(X_test)]
             ax.plot(X_test.squeeze(), pred_sample,
-                            color='teal', alpha=.01, linewidth=2.0)
+                    color='teal', alpha=.01, linewidth=2.0)
 
     # plot ground truth
     if isinstance(X_test, np.ndarray):
-        ax.plot(X_test.squeeze(), y_test.squeeze(), c='black')
+        y_X_ratio = len(y_test) / len(X_test)
+        if y_X_ratio.is_integer():
+            y_X_ratio = int(y_X_ratio)
+            for fold_index in range(y_X_ratio):
+                index_start = int(fold_index * len(X_test))
+                index_end = int((fold_index + 1) * len(X_test))
+                y_test_plot = y_test.squeeze()[index_start:index_end]
+                ax.plot(X_test.squeeze(), y_test_plot, c='black')
+        else:
+            raise ValueError("y_test must be multiple of X_test.")
+
     if isinstance(X_train, np.ndarray):
         ax.plot(X_train.squeeze(), y_train.squeeze(), 'o', c='red',
                 markeredgecolor='black')
     if isinstance(X_induce, np.ndarray):
         for x_vertical in X_induce:
             plt.axvline(x=x_vertical, c='black', alpha=.2)
-
 
     plt.title(title)
     plt.ylim([-4.5, 4.5])
@@ -214,20 +235,22 @@ def prob_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
         title: (str) Title of the image.
         save_addr: (str) Address to save image to.
     """
-    # TODO(jereliu): extend to multivariate setting.
 
     if save_addr:
         plt.ioff()
 
-    ecdf_sample = eval_util.ecdf_eval(Y_obs, Y_sample)
-    ecdf_func = eval_util.make_empirical_cdf_1d(ecdf_sample)
+    ecdf_sample = metric_util.ecdf_eval(Y_obs, Y_sample)
+    ecdf_func = metric_util.make_empirical_cdf_1d(ecdf_sample)
 
     ecdf_eval = np.linspace(0, 1, 1000)
+    ecdf_valu = ecdf_func(ecdf_eval)
 
     fig, ax = plt.subplots()
     ax.plot(ecdf_eval, ecdf_eval, c="black")
-    ax.plot(ecdf_eval, ecdf_func(ecdf_eval))
-    plt.title("Probabilistic Calibration, {}".format(title))
+    ax.plot(ecdf_eval, ecdf_valu)
+    total_variation = np.mean(np.abs(ecdf_eval - ecdf_valu))
+    plt.title("Probabilistic Calibration, {}, Score: {:.3f}".format(
+        title, total_variation))
 
     if save_addr:
         plt.savefig(save_addr)
@@ -245,15 +268,14 @@ def marginal_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
         title: (str) Title of the image.
         save_addr: (str) Address to save image to.
     """
-    # TODO(jereliu): extend to multivariate setting.
 
     if save_addr:
         plt.ioff()
 
     ecdf_eval = np.linspace(np.min(Y_obs), np.max(Y_obs), 1000)
 
-    ecdf_obsv = eval_util.make_empirical_cdf_1d(Y_obs)
-    ecdf_pred = eval_util.make_empirical_cdf_1d(Y_sample)
+    ecdf_obsv = metric_util.make_empirical_cdf_1d(Y_obs)
+    ecdf_pred = metric_util.make_empirical_cdf_1d(Y_sample)
 
     ecdf_sample_obsv = ecdf_obsv(ecdf_eval)
     ecdf_sample_pred = ecdf_pred(ecdf_eval)
@@ -324,7 +346,6 @@ def model_composition_1d(X_value, corr_mat, weight_sample,
                                  ax_mean=ax2)
     ax2.axvline(X_value, c='red', alpha=0.5, linewidth=2)
     ax2.set(adjustable='box-forced')
-
 
     corr_matrix(corr_mat, model_names=model_names, ax=ax3)
     ax3.set_title("X={}".format(X_value))

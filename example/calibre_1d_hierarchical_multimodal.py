@@ -33,9 +33,9 @@ import seaborn as sns
 
 tfd = tfp.distributions
 
-_SAVE_ADDR_PREFIX = "./result/calibre_1d_tree"
+_SAVE_ADDR_PREFIX = "./result/calibre_1d_tree_multimodal"
 
-_MULTIMODAL_DATA = False
+_MULTIMODAL_DATA = True
 _FIT_BASE_MODELS = True
 _PLOT_COMPOSITION = False
 
@@ -76,8 +76,8 @@ DEFAULT_LS_RESID = 0.2
 # 1. Generate data
 """""""""""""""""""""""""""""""""
 
-N_train = 20
-N_test = 20
+N_train = 50
+N_test = 50
 N_valid = 500
 
 if not _MULTIMODAL_DATA:
@@ -573,7 +573,7 @@ n_inference_sample = 100
 n_final_sample = 10000  # number of samples to collect from variational family
 max_steps = 20000  # number of training iterations
 
-family_name = "mfvi"
+family_name = "sgpr"
 
 if family_name == "mfvi":
     family_name_full = "Mean-field VI"
@@ -991,7 +991,7 @@ n_inference_sample = 1000  # number of samples to collect from variational famil
 n_final_sample = 10000  # number of samples to collect from variational family for final summary
 max_steps = 10000  # number of training iterations
 
-family_name = "mfvi_aug"
+family_name = "sgpr_aug"
 
 if "mfvi" in family_name:
     family_name_full = "Mean-field VI"
