@@ -207,15 +207,14 @@ def fit_base_gp_models(X_train, y_train,
         test_pred_list[kern_name] = mu_test
         valid_pred_list[kern_name] = mu_valid
         valid_samp_list[kern_name] = (
-                np.expand_dims(mu_valid, 1) +
+                np.expand_dims(mu_valid, -1) +
                 np.random.normal(size=(num_valid_obs, n_valid_sample)) *
-                np.expand_dims(np.sqrt(var_valid), 1)
+                np.expand_dims(np.sqrt(var_valid), -1)
         )
 
         # visualization
         visual_util.gpr_1d_visual(
-            pred_mean=mu_valid,
-            pred_cov=var_valid,
+            pred_mean=mu_valid, pred_cov=var_valid,
             X_train=X_train, y_train=y_train,
             X_test=X_valid, y_test=y_valid,
             title=kern_name,

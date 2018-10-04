@@ -140,12 +140,13 @@ mu = np.mean(f_test_val, axis=1)
 cov = np.var(f_test_val, axis=1)
 
 gpr_1d_visual(mu, cov,
-              X_train, y_train, X_test, y_test,
+              X_train=X_train, y_train=y_train,
+              X_test=X_test, y_test=y_test,
               title="RBF, Hamilton MC",
               save_addr="./result/gpr/gpr_hmc.png")
 
 """""""""""""""""""""""""""""""""
-# 3. Mean-field VI with Exact Predictive
+# 3. Mean-field VI
 """""""""""""""""""""""""""""""""
 
 """ 3.1. Set up the computational graph """
@@ -218,7 +219,8 @@ mu = np.mean(f_test_val, axis=1)
 cov = np.var(f_test_val, axis=1)
 
 gpr_1d_visual(mu, cov,
-              X_train, y_train, X_test, y_test,
+              X_train=X_train, y_train=y_train,
+              X_test=X_test, y_test=y_test,
               title="RBF, Mean-field VI",
               save_addr="./result/gpr/gpr_mfvi.png")
 
@@ -306,7 +308,8 @@ mu = np.mean(f_test_val, axis=1)
 cov = np.var(f_test_val, axis=1)
 
 gpr_1d_visual(mu, cov,
-              X_train, y_train, X_test, y_test,
+              X_train=X_train, y_train=y_train,
+              X_test=X_test, y_test=y_test,
               X_induce=X_induce,
               title="RBF, Structured VI (Sparse GP)",
               save_addr="./result/gpr/gpr_sgp.png")

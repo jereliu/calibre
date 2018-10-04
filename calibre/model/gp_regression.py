@@ -49,6 +49,7 @@ def model(X, ls=1., ridge_factor=1e-4):
                                      scale_tril=tf.cholesky(K_mat),
                                      name="gp_f")
     sigma = ed.Normal(loc=-5., scale=1., name='sigma')
+
     y = ed.MultivariateNormalDiag(loc=gp_f,
                                   scale_identity_multiplier=tf.exp(sigma),
                                   name="y")

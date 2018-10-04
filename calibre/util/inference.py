@@ -5,6 +5,7 @@ from tensorflow_probability import edward2 as ed
 
 tfd = tfp.distributions
 
+
 def make_value_setter(**model_kwargs):
     """Creates a value-setting interceptor for VI under Edward2."""
 
