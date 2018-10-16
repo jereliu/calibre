@@ -1,5 +1,6 @@
 """Utility functions for visualization"""
 import os
+import pathlib
 
 import pandas as pd
 import numpy as np
@@ -13,8 +14,9 @@ import calibre.util.metric as metric_util
 def gpr_1d_visual(pred_mean,
                   pred_cov=None, pred_quantiles=[],
                   pred_samples=None,
-                  X_train=None, y_train=None, X_test=None, y_test=None,
-                  X_induce=None, title="", save_addr=""):
+                  X_train=None, y_train=None, X_test=None, y_test=None, X_induce=None,
+                  quantile_colors=None, quantile_alpha=0.1,
+                  title="", save_addr=""):
     """Plots the GP posterior predictive mean and uncertainty.
 
     Args:
@@ -37,6 +39,7 @@ def gpr_1d_visual(pred_mean,
     """
     # TODO(jereliu): Write a save function decorator.
     if save_addr:
+        pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
         plt.ioff()
 
     fig, ax = plt.subplots()
@@ -63,18 +66,22 @@ def gpr_1d_visual(pred_mean,
 
     # posterior quantile
     if isinstance(pred_quantiles, list):
-        for upper, lower in pred_quantiles:
+        if quantile_colors is None:
+            quantile_colors = ["black"] * len(pred_quantiles)
+
+        for id, (upper, lower) in enumerate(pred_quantiles):
             upper = upper.squeeze()[:len(X_test)]
             lower = lower.squeeze()[:len(X_test)]
             ax.fill_between(X_test.squeeze(), upper, lower,
-                            color='black', alpha=.1, edgecolor=None, linewidth=0.0)
+                            color=quantile_colors[id],
+                            alpha=quantile_alpha, edgecolor=None, linewidth=0.0)
 
     # posterior samples
     if isinstance(pred_samples, list):
         for pred_sample in pred_samples:
             pred_sample = pred_sample.squeeze()[:len(X_test)]
             ax.plot(X_test.squeeze(), pred_sample,
-                    color='teal', alpha=.01, linewidth=2.0)
+                    color='teal', alpha=.01, linewidth=2)
 
     # plot ground truth
     if isinstance(X_test, np.ndarray):
@@ -105,12 +112,45 @@ def gpr_1d_visual(pred_mean,
         plt.ion()
 
 
+def gpr_2d_visual(pred_mean, pred_cov,
+                  X_train, y_train, X_test, y_test,
+                  title="", save_addr=""):
+    if save_addr:
+        pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
+        plt.ioff()
+
+    # prediction surface
+    n_reshape = int(np.sqrt(pred_mean.size))
+    pred_mean_plot = pred_mean.reshape(n_reshape, n_reshape)
+    X_valid = X_test.reshape(n_reshape, n_reshape, 2)
+    x_grid, y_grid = X_valid[:, :, 0], X_valid[:, :, 1]
+
+    ax = plt.axes(projection='3d')
+    if isinstance(X_train, np.ndarray):
+        ax.scatter(X_train[:, 0], X_train[:, 1], y_train, c="black")
+    ax.plot_surface(X=x_grid, Y=y_grid, Z=pred_mean_plot, cmap='inferno')
+    ax.set_zlim(np.min(y_test), np.max(y_test))
+
+    # optionally, compute RMSE
+    if pred_mean.size == y_test.size:
+        rmse = np.mean((pred_mean - y_test) ** 2)
+        title = "{}, RMSE={:.4f}".format(title, rmse)
+
+    plt.title(title)
+
+    if save_addr:
+        plt.savefig(save_addr)
+        plt.close()
+        plt.ion()
+
+
 def plot_base_prediction(base_pred,
                          X_valid, y_valid=None,
                          X_train=None, y_train=None,
                          ax=None,
                          save_addr="", **kwargs):
     if save_addr:
+        pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
         plt.ioff()
 
     # prepare for plotting predictions
@@ -158,6 +198,7 @@ def plot_ensemble_weight_mean_1d(X, weight_sample, model_names="",
 
     # plot posterior mean
     if save_addr_prefix:
+        pathlib.Path(save_addr_prefix).mkdir(parents=True, exist_ok=True)
         plt.ioff()
 
     if not ax_mean:
@@ -197,6 +238,7 @@ def plot_ensemble_weight_median_1d(X, weight_sample, model_names="",
 
     # plot posterior median
     if save_addr_prefix:
+        pathlib.Path(save_addr_prefix).mkdir(parents=True, exist_ok=True)
         plt.ioff()
 
     if not ax_median:
@@ -225,6 +267,34 @@ def plot_ensemble_weight_median_1d(X, weight_sample, model_names="",
         plt.ioff()
 
 
+def plot_ensemble_weight_mean_2d(X, weight_sample, model_names,
+                                 save_addr_prefix=""):
+    """Plots the posterior mean and median of weight sample for K models.
+
+    Args:
+        X: (np.ndarray of float32) A 1D array of feature values, dimension (N_obs, )
+        weight_sample: (np.ndarray of float32) Sample of model ensemble weights
+            dimension (N_sample, N_obs, num_models).
+        model_names: (list of str) list of model names, dimension (num_models, ).
+        save_addr_prefix: (str) Prefix for save address.
+    """
+    _, _, num_models = weight_sample.shape
+
+    weight_mean = np.nanmean(weight_sample, axis=0)
+
+    # plot posterior mean
+    if save_addr_prefix:
+        pathlib.Path("{}/weight_mean/".format(save_addr_prefix)).mkdir(
+            parents=True, exist_ok=True)
+
+    for k in range(num_models):
+        gpr_2d_visual(weight_mean[:, k], None,
+                      None, None, X, np.array([-0.05, 1.05]),
+                      title="Ensemble Posterior Mean, {}".format(model_names[k]),
+                      save_addr="{}/weight_mean/{}.png".format(
+                          save_addr_prefix, model_names[k]))
+
+
 def prob_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
     """Plots the reliability diagram (i.e. CDF for F^{-1}(y) ) for 1D prediction.
 
@@ -237,6 +307,7 @@ def prob_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
     """
 
     if save_addr:
+        pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
         plt.ioff()
 
     ecdf_sample = metric_util.ecdf_eval(Y_obs, Y_sample)
@@ -270,6 +341,7 @@ def marginal_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
     """
 
     if save_addr:
+        pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
         plt.ioff()
 
     ecdf_eval = np.linspace(np.min(Y_obs), np.max(Y_obs), 1000)
@@ -296,6 +368,7 @@ def marginal_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
 def corr_matrix(corr_mat, ax=None, model_names="auto", save_addr=""):
     """Visualize correlation matrix."""
     if save_addr:
+        pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
         plt.ioff()
 
     if not ax:
@@ -328,6 +401,7 @@ def model_composition_1d(X_value, corr_mat, weight_sample,
                          model_names, save_addr=""):
     """Plot aligned graph with base prediction at left and correlation at right."""
     if save_addr:
+        pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
         plt.ioff()
 
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
