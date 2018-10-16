@@ -2,12 +2,15 @@
 
 import os
 import sys
+import pathlib
 
 import pickle as pk
 
 import numpy as np
 
 import tensorflow as tf
+
+import GPy as gpy
 import gpflowSlim as gpf
 
 sys.path.extend([os.getcwd()])
@@ -15,7 +18,7 @@ sys.path.extend([os.getcwd()])
 import calibre.util.visual as visual_util
 
 # Example dictionary of kernel functions to fit. """
-DEFAULT_KERN_FUNC_DICT = {
+DEFAULT_KERN_FUNC_DICT_GPFLOW = {
     "poly_1": {'kernel': gpf.kernels.Polynomial,
                'param': {'degree': 1.,
                          'train_kernel_params': False}},
@@ -58,15 +61,15 @@ DEFAULT_KERN_FUNC_DICT = {
     "period_auto": {'kernel': gpf.kernels.Periodic,
                     'param': {'lengthscales': .15, 'period': 1.5,
                               'train_kernel_params': True}},
-    "matern12_0.15": {'kernel': gpf.kernels.Matern12,
+    "matern12_auto": {'kernel': gpf.kernels.Matern12,
                       'param': {'lengthscales': .15,
-                                'train_kernel_params': False}},
-    "matern32_0.15": {'kernel': gpf.kernels.Matern32,
+                                'train_kernel_params': True}},
+    "matern32_auto": {'kernel': gpf.kernels.Matern32,
                       'param': {'lengthscales': .15,
-                                'train_kernel_params': False}},
-    "matern52_0.15": {'kernel': gpf.kernels.Matern52,
+                                'train_kernel_params': True}},
+    "matern52_auto": {'kernel': gpf.kernels.Matern52,
                       'param': {'lengthscales': .15,
-                                'train_kernel_params': False}},
+                                'train_kernel_params': True}},
     "rbf_1": {'kernel': gpf.kernels.RBF,
               'param': {'lengthscales': 1.,
                         'train_kernel_params': False}},
@@ -87,6 +90,49 @@ DEFAULT_KERN_FUNC_DICT = {
                            'train_kernel_params': True}},
 }
 
+DEFAULT_KERN_FUNC_DICT_GPY = {
+    "poly_1": {'kernel': gpy.kern.Poly,
+               'param': {'order': 1.}},
+    "poly_2": {'kernel': gpy.kern.Poly,
+               'param': {'order': 2.}},
+    "poly_3": {'kernel': gpy.kern.Poly,
+               'param': {'order': 3.}},
+    "rquad1": {'kernel': gpy.kern.RatQuad,
+               'param': {'lengthscale': None, 'power': 1.}},
+    "rquad2": {'kernel': gpy.kern.RatQuad,
+               'param': {'lengthscale': None, 'power': 2.}},
+    "period0.5": {'kernel': gpy.kern.StdPeriodic,
+                  'param': {'lengthscale': None, 'period': .5}},
+    "period1": {'kernel': gpy.kern.StdPeriodic,
+                'param': {'lengthscale': None, 'period': 1.}},
+    "period1.5": {'kernel': gpy.kern.StdPeriodic,
+                  'param': {'lengthscale': None, 'period': 1.5}},
+    "period_auto": {'kernel': gpy.kern.StdPeriodic,
+                    'param': {'lengthscale': .15, 'period': None}},
+    "matern12": {'kernel': gpy.kern.OU,
+                 'param': {'lengthscale': None}},
+    "matern32": {'kernel': gpy.kern.Matern32,
+                 'param': {'lengthscale': None}},
+    "matern52": {'kernel': gpy.kern.Matern52,
+                 'param': {'lengthscale': None}},
+    "rbf_1": {'kernel': gpf.kernels.RBF,
+              'param': {'lengthscales': 1.,
+                        'train_kernel_params': False}},
+    "rbf_0.5": {'kernel': gpf.kernels.RBF,
+                'param': {'lengthscales': .5,
+                          'train_kernel_params': False}},
+    "rbf_0.2": {'kernel': gpf.kernels.RBF,
+                'param': {'lengthscales': .2,
+                          'train_kernel_params': False}},
+    "rbf_0.05": {'kernel': gpf.kernels.RBF,
+                 'param': {'lengthscales': .05,
+                           'train_kernel_params': False}},
+    "rbf_auto": {'kernel': gpy.kern.RBF,
+                 'param': {'lengthscale': None}},
+    "mlp_auto": {'kernel': gpy.kern.MLP,
+                 'param': {'weight_variance': 1.}},
+
+}
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 """ Predictive functions, GPflow Implementation """
@@ -132,7 +178,7 @@ def fit_gpflow(X_train, y_train,
         # define optimization
         objective = m.objective
         param_dict = {par.name: par.value for par in m.parameters}
-        optimizer = tf.train.AdamOptimizer(1e-3)
+        optimizer = tf.train.AdamOptimizer(5e-3)
         train_op = optimizer.minimize(objective)
 
         # define prediction
@@ -163,13 +209,56 @@ def fit_gpflow(X_train, y_train,
 
         sess.close()
 
-    return mu_test, var_test, mu_valid, var_valid, par_dict, m, k
+    return mu_test, var_test, mu_valid, var_valid,
+
+
+def fit_gpy(X_train, y_train,
+            X_test, X_valid,
+            kern_func=None, n_step=10000,
+            **kwargs):
+    """Fits GP regression using GPflow
+
+    Args:
+        X_train: (np.ndarray of float32) Training data (N_train, D).
+        y_train: (np.ndarray of float32) Training labels (N_train, D).
+        X_test: (np.ndarray of float32) Testintg features (N_test, D).
+        X_valid: (np.ndarray of float32) Validation features (N_test, D).
+        kern_func: (gpflow.kernels) GPflow kernel function.
+        n_step: (int) number of optimization iterations.
+        kwargs: Additional arguments passed to kern_func.
+
+    Returns::
+        mu, var: (np.ndarray) Posterior predictive mean/variance.
+        par_val: (list of np.ndarray) List of model parameter values
+        m: (gpflow.models.gpr) gpflow model object.
+        k: (gpflow.kernels) gpflow kernel object.
+    """
+    if y_train.ndim == 1:
+        y_train = np.expand_dims(y_train, 1)
+
+    # define model
+    if not kern_func:
+        k = gpy.kern.RBF(input_dim=X_train.shape[1], ARD=True)
+    else:
+        k = kern_func(input_dim=X_train.shape[1], **kwargs)
+
+    m = gpy.models.GPRegression(X_train, y_train, kernel=k)
+
+    # define optimization
+    m.optimize_restarts(num_restarts=10)
+
+    # define prediction
+    mu_test, var_test = m.predict(X_test)
+    mu_valid, var_valid = m.predict(X_valid)
+
+    return mu_test, var_test, mu_valid, var_valid,
 
 
 def fit_base_gp_models(X_train, y_train,
                        X_test, y_test, X_valid, y_valid,
-                       kern_func_dict=DEFAULT_KERN_FUNC_DICT,
+                       kern_func_dict=DEFAULT_KERN_FUNC_DICT_GPY,
                        n_valid_sample=5000,
+                       n_train_step=20000,
                        save_addr_prefix="./plot/calibre/base"):
     """Run GPflow-Slim GPR according to list of supplied kernel functions.
 
@@ -185,9 +274,12 @@ def fit_base_gp_models(X_train, y_train,
             For example see calibre.util.gp_flow.DEFAULT_KERN_FUNC_DICT
         n_valid_sample: (int) Number of samples to draw from posterior predictive
             for validation predictions.
+        n_train_step: (int) Number of training step.
         save_addr_prefix: (str) Prefix to save address for plots and
             model prediction/samples.
     """
+    pathlib.Path(save_addr_prefix).mkdir(parents=True, exist_ok=True)
+
     num_valid_obs = X_valid.shape[0]
 
     # obtain base model predictions
@@ -198,27 +290,48 @@ def fit_base_gp_models(X_train, y_train,
     for kern_name, kern_obj in kern_func_dict.items():
         print("\n\nFitting {}".format(kern_name))
         kern_func, kern_pars = kern_obj.values()
+        # decide kernel function
+        if _get_module_name(kern_func) == "GPy":
+            fit_gp_func = fit_gpy
+        elif _get_module_name(kern_func) == "gpflowSlim":
+            fit_gp_func = fit_gpflow
+        else:
+            raise ValueError("supplied kernel function must from either "
+                             "'GPy' or 'GPFlowSlim' ")
+
         (mu_test, var_test, mu_valid, var_valid,
-         par_val, _, _) = fit_gpflow(X_train, y_train,
-                                     X_test, X_valid,
-                                     n_step=10000,
-                                     kern_func=kern_func, **kern_pars)
+         ) = fit_gp_func(X_train, y_train,
+                         X_test, X_valid,
+                         n_step=n_train_step,
+                         kern_func=kern_func, **kern_pars)
+
         # store variable names
-        test_pred_list[kern_name] = mu_test
-        valid_pred_list[kern_name] = mu_valid
+        mu_test = mu_test.squeeze().astype(np.float32)
+        mu_valid = mu_valid.squeeze().astype(np.float32)
+
+        test_pred_list[kern_name] = mu_test.squeeze()
+        valid_pred_list[kern_name] = mu_valid.squeeze()
         valid_samp_list[kern_name] = (
-                np.expand_dims(mu_valid, -1) +
+                np.expand_dims(mu_valid.squeeze(), -1) +
                 np.random.normal(size=(num_valid_obs, n_valid_sample)) *
-                np.expand_dims(np.sqrt(var_valid), -1)
+                np.expand_dims(np.sqrt(var_valid.squeeze()), -1)
         )
 
         # visualization
-        visual_util.gpr_1d_visual(
-            pred_mean=mu_valid, pred_cov=var_valid,
-            X_train=X_train, y_train=y_train,
-            X_test=X_valid, y_test=y_valid,
-            title=kern_name,
-            save_addr="{}/fit/{}.png".format(save_addr_prefix, kern_name))
+        if X_train.size == y_train.size:
+            visual_util.gpr_1d_visual(
+                pred_mean=mu_valid, pred_cov=var_valid,
+                X_train=X_train, y_train=y_train,
+                X_test=X_valid, y_test=y_valid,
+                title=kern_name,
+                save_addr="{}/fit/{}.png".format(save_addr_prefix, kern_name))
+        elif X_train.squeeze().ndim == 2:
+            visual_util.gpr_2d_visual(
+                pred_mean=mu_valid, pred_cov=var_valid,
+                X_train=X_train, y_train=y_train,
+                X_test=X_valid, y_test=y_valid,
+                title=kern_name,
+                save_addr="{}/fit/{}.png".format(save_addr_prefix, kern_name))
 
         visual_util.prob_calibration_1d(
             y_valid, valid_samp_list[kern_name],
@@ -226,11 +339,11 @@ def fit_base_gp_models(X_train, y_train,
             save_addr="{}/reliability/{}_prob.png".format(
                 save_addr_prefix, kern_name))
 
-        visual_util.marginal_calibration_1d(
-            y_valid, valid_samp_list[kern_name],
-            title=kern_name,
-            save_addr="{}/reliability/{}_marginal.png".format(
-                save_addr_prefix, kern_name))
+        # visual_util.marginal_calibration_1d(
+        #     y_valid, valid_samp_list[kern_name],
+        #     title=kern_name,
+        #     save_addr="{}/reliability/{}_marginal.png".format(
+        #         save_addr_prefix, kern_name))
 
     # save test/validation prediction, and also validation samples
     with open('{}/base_test_pred.pkl'.format(save_addr_prefix), 'wb') as file:
@@ -243,4 +356,7 @@ def fit_base_gp_models(X_train, y_train,
         pk.dump(valid_samp_list, file, protocol=pk.HIGHEST_PROTOCOL)
 
 
-
+def _get_module_name(function):
+    """Extracts module signature of a function."""
+    full_name = function.__module__
+    return full_name.split(".")[0]
