@@ -19,7 +19,7 @@ def make_value_setter(**model_kwargs):
     return set_values
 
 
-def scalar_gaussian_variational(name):
+def scalar_gaussian_variational(name, mean=None, sdev=None):
     """
     Creates a scalar Gaussian random variable for variational approximation.
 
@@ -29,8 +29,15 @@ def scalar_gaussian_variational(name):
     Returns:
         (ed.RandomVariable of float32) A normal scalar random variable.
     """
-    mean = tf.get_variable(shape=[], name='{}_mean'.format(name))
-    sdev = tf.exp(tf.get_variable(shape=[], name='{}_sdev'.format(name)))
+    if mean is None:
+        mean = tf.get_variable(shape=[], name='{}_mean'.format(name))
+    else:
+        mean = tf.convert_to_tensor(mean, dtype=tf.float32)
+
+    if sdev is None:
+        sdev = tf.exp(tf.get_variable(shape=[], name='{}_sdev'.format(name)))
+    else:
+        sdev = tf.convert_to_tensor(sdev, dtype=tf.float32)
 
     scalar_gaussian_rv = ed.Normal(loc=mean, scale=sdev, name=name)
     return scalar_gaussian_rv, mean, sdev

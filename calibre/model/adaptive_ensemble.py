@@ -17,6 +17,9 @@ from calibre.util.model import sparse_softmax
 
 tfd = tfp.distributions
 
+_LS_PRIOR_MEAN = -5.
+_LS_PRIOR_SDEV = 1.
+
 _NOISE_PRIOR_MEAN = -5.
 _NOISE_PRIOR_SDEV = 1.
 
@@ -88,7 +91,8 @@ def sparse_conditional_weight(X, base_pred, temp,
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
-def model_flat(X, base_pred, family_tree=None, ls_weight=1., ls_resid=1., **kwargs):
+def model_flat(X, base_pred, family_tree=None,
+               ls_weight=1., ls_resid=1., **kwargs):
     r"""Defines the sparse adaptive ensemble model.
 
         y           ~   N(f, sigma^2)
@@ -158,7 +162,7 @@ def model_flat(X, base_pred, family_tree=None, ls_weight=1., ls_resid=1., **kwar
 
 
 def model_tailfree(X, base_pred, family_tree=None,
-                   ls_weight=1., ls_resid=1., **kwargs):
+                   log_ls_weight=None, log_ls_resid=None, **kwargs):
     r"""Defines the sparse adaptive ensemble model.
 
         y           ~   N(f, sigma^2)
@@ -174,11 +178,13 @@ def model_tailfree(X, base_pred, family_tree=None,
             from base models. For each item in the dictionary,
             key is the model name, and value is the model prediction with
             dimension (N, ).
-        ls_weight: (float32) lengthscale for the kernel of ensemble weight GPs.
-        ls_resid: (float32) lengthscale for the kernel of residual process GP.
         family_tree: (dict of list or None) A dictionary of list of strings to
             specify the family tree between models, if None then assume there's
             no structure (i.e. flat).
+        log_ls_weight: (float32) length-scale parameter for weight GP.
+            If None then will estimate automatically.
+        log_ls_resid: (float32) length-scale parameter for residual GP.
+            If None then will estimate automatically.
         **kwargs: Additional parameters to pass to tail_free.prior.
 
     Returns:
@@ -192,10 +198,19 @@ def model_tailfree(X, base_pred, family_tree=None,
                 "All base-model predictions should have shape ({},), but"
                 "observed {} for '{}'".format(N, value.shape, key))
 
+    # specify prior for lengthscale and observation noise
+    if log_ls_weight is None:
+        log_ls_weight = ed.Normal(loc=_LS_PRIOR_MEAN, scale=_LS_PRIOR_SDEV, name="ls_weight")
+    if log_ls_resid is None:
+        log_ls_resid = ed.Normal(loc=_LS_PRIOR_MEAN, scale=_LS_PRIOR_SDEV, name="ls_resid")
+
+    sigma = ed.Normal(loc=_NOISE_PRIOR_MEAN,
+                      scale=_NOISE_PRIOR_SDEV, name="sigma")
+
     # specify tail-free priors for ensemble weight
     ensemble_weights, model_names = tail_free.prior(X, base_pred,
                                                     family_tree=family_tree,
-                                                    ls=ls_weight,
+                                                    ls=tf.exp(log_ls_weight),
                                                     name="ensemble_weight",
                                                     **kwargs)
 
@@ -205,12 +220,10 @@ def model_tailfree(X, base_pred, family_tree=None,
     ensemble_mean = tf.reduce_sum(FW, axis=1, name="ensemble_mean")
 
     # specify residual process
-    ensemble_resid = gp.prior(
-        X, ls_resid, kernel_func=gp.rbf, name="ensemble_resid")
-
-    # specify observation noise
-    sigma = ed.Normal(loc=_NOISE_PRIOR_MEAN,
-                      scale=_NOISE_PRIOR_SDEV, name="sigma")
+    ensemble_resid = gp.prior(X,
+                              ls=tf.exp(log_ls_resid),
+                              kernel_func=gp.rbf,
+                              name="ensemble_resid")
 
     # specify observation
     y = ed.MultivariateNormalDiag(loc=ensemble_mean + ensemble_resid,
@@ -299,11 +312,8 @@ def sample_posterior_mean_flat(base_pred, weight_sample, temp_sample,
     return f_ens_sample
 
 
-def sample_posterior_tailfree(X, base_pred_dict, family_tree,
-                              weight_gp_dict, temp_dict, resid_gp_sample,
-                              kernel_func=gp.rbf, ls_weight=1.,
-                              link_func=sparse_softmax,
-                              ridge_factor=1e-3):
+def sample_posterior_tailfree(X, base_pred_dict, family_tree, weight_gp_dict, temp_dict, resid_gp_sample,
+                              kernel_func=gp.rbf, log_ls_weight=1., link_func=sparse_softmax, ridge_factor=1e-3):
     """Obtain Samples from the posterior mean and posterior predictive.
 
     Args:
@@ -320,7 +330,7 @@ def sample_posterior_tailfree(X, base_pred_dict, family_tree,
         resid_gp_sample: (np.ndarray) GP samples for residual process corresponding to X.
         kernel_func: (function) kernel function for base ensemble,
             with args (X, **kwargs).
-        ls_weight: (float32) lengthscale for the kernel of ensemble weight GPs.
+        log_ls_weight: (float32) lengthscale for the kernel of ensemble weight GPs.
         link_func: (function) a link function that transforms the unnormalized
             base ensemble weights to a K-dimension simplex.
         ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
@@ -344,7 +354,8 @@ def sample_posterior_tailfree(X, base_pred_dict, family_tree,
                                            kernel_func=kernel_func,
                                            link_func=link_func,
                                            ridge_factor=ridge_factor,
-                                           ls=ls_weight))
+                                           ls=tf.exp(log_ls_weight))
+        )
 
         ensemble_weight_tensors, ensemble_model_names = (
             tail_free.compute_leaf_weights(node_weights=cond_weight_tensors_dict,
@@ -379,9 +390,8 @@ def sample_posterior_tailfree(X, base_pred_dict, family_tree,
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
-def variational_family(X, base_pred, family_tree=None,
-                       gp_vi_family=gp.variational_mfvi,
-                       ls_weight=1., ls_resid=1., **kwargs):
+def variational_family(X, base_pred, log_ls_weight=None, log_ls_resid=None, family_tree=None,
+                       gp_vi_family=gp.variational_mfvi, **kwargs):
     """Defines the variational family for sparse adaptive ensemble model.
 
     Args:
@@ -390,10 +400,13 @@ def variational_family(X, base_pred, family_tree=None,
             from base models. For each item in the dictionary,
             key is the model name, and value is the model prediction with
             dimension (N, ).
+        log_ls_weight: (float32) Value of lengthscale parameter for weight GP,
+            if None then perform variational approximation.
+        log_ls_resid: (float32) Value of lengthscale parameter for residual GP,
+            if None then perform variational approximation.
+        ls_stdev: (float32) Prior standard dev for ls variational families.
         gp_vi_family: (function) A variational family for node weight
             GPs in the family tree.
-        ls_weight: (float32) lengthscale for the kernel of ensemble weight GPs.
-        ls_resid: (float32) lengthscale for the kernel of residual process GP.
         family_tree: (dict of list or None) A dictionary of list of strings to
             specify the family tree between models, if None then assume there's
             no structure (i.e. flat).
@@ -429,6 +442,18 @@ def variational_family(X, base_pred, family_tree=None,
         sigma_mean: (tf.Variable) Variational parameters for the mean of obs noise.
         sigma_sdev: (tf.Variable) Variational parameters for the stddev of obs noise.
     """
+    # lengthscale parameters
+    if log_ls_weight is None:
+        log_ls_weight, ls_weight_mean, ls_weight_sdev = (
+            inference_util.scalar_gaussian_variational(name='ls_weight'))
+    else:
+        log_ls_weight = tf.convert_to_tensor(log_ls_weight, dtype=tf.float32)
+
+    if log_ls_resid is None:
+        log_ls_resid, ls_resid_mean, ls_resid_sdev = (
+            inference_util.scalar_gaussian_variational(name='ls_resid'))
+    else:
+        log_ls_resid = tf.convert_to_tensor(log_ls_resid, dtype=tf.float32)
 
     # temperature and base_weight gps
     (weight_gp_dict, temp_dict,
@@ -437,29 +462,29 @@ def variational_family(X, base_pred, family_tree=None,
         tail_free.variational_family(X, base_pred,
                                      family_tree=family_tree,
                                      gp_vi_family=gp_vi_family,
-                                     ls=ls_weight, **kwargs))
+                                     ls=tf.exp(log_ls_weight), **kwargs))
 
     # residual gp
-    resid_gp, resid_gp_mean, resid_gp_vcov = gp_vi_family(X, ls=ls_resid,
+    resid_gp, resid_gp_mean, resid_gp_vcov = gp_vi_family(X,
+                                                          ls=tf.exp(log_ls_resid),
                                                           name='vi_ensemble_resid',
                                                           **kwargs)
 
     # observation noise
     sigma, sigma_mean, sigma_sdev = inference_util.scalar_gaussian_variational(name='sigma')
 
-    return (weight_gp_dict, resid_gp, temp_dict, sigma,  # variational RVs
-            weight_gp_mean_dict, weight_gp_vcov_dict,  # weight GP variational parameters
-            resid_gp_mean, resid_gp_vcov,  # resid GP variational parameters
-            temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
-            sigma_mean, sigma_sdev  # obs noise variational parameters
-            )
+    return (weight_gp_dict, resid_gp, temp_dict, sigma, log_ls_weight, log_ls_resid,  # variational RVs
+            # variational parameters
+            weight_gp_mean_dict, weight_gp_vcov_dict,  # weight GP
+            resid_gp_mean, resid_gp_vcov,  # resid GP
+            temp_mean_dict, temp_sdev_dict,  # temperature
+            sigma_mean, sigma_sdev,  # obs noise
+    )
 
 
-def variational_family_sample(n_sample,
-                              weight_gp_mean_dict, weight_gp_vcov_dict,
-                              temp_mean_dict, temp_sdev_dict,
-                              resid_gp_mean, resid_gp_vcov,
-                              sigma_mean, sigma_sdev,
+def variational_family_sample(n_sample, weight_gp_mean_dict, weight_gp_vcov_dict, temp_mean_dict, temp_sdev_dict,
+                              resid_gp_mean, resid_gp_vcov, sigma_mean, sigma_sdev, log_ls_weight_mean,
+                              log_ls_weight_sdev, log_ls_resid_mean, log_ls_resid_sdev,
                               gp_sample_func=gp.variational_mfvi_sample):
     """Samples from the variational family for adaptive ensemble.
 
@@ -479,6 +504,10 @@ def variational_family_sample(n_sample,
             the stddev or covariance matrix of residual GP.
         sigma_mean: (float32) Variational parameters for the mean of obs noise.
         sigma_sdev: (float32) Variational parameters for the stddev of obs noise.
+        log_ls_weight_mean: (float32) Variational parameters for the mean of ls_weight.
+        log_ls_weight_sdev: (float32) Variational parameters for the stddev of ls_weight.
+        log_ls_resid_mean: (float32) Variational parameters for the mean of ls_resid.
+        log_ls_resid_sdev: (float32) Variational parameters for the stddev of ls_resid.
         gp_sample_func: (function): Sampling function for Gaussian Process variational family.
 
     Returns:
@@ -495,14 +524,20 @@ def variational_family_sample(n_sample,
                                             weight_gp_mean_dict, weight_gp_vcov_dict,
                                             temp_mean_dict, temp_sdev_dict,
                                             gp_sample_func=gp_sample_func))
+
     # sample residual process gp
     resid_gp_sample = gp_sample_func(n_sample, resid_gp_mean, resid_gp_vcov)
 
     # sample observational noise
     sigma_sample = inference_util.scalar_gaussian_variational_sample(
         n_sample, sigma_mean, sigma_sdev)
+    ls_weight_sample = inference_util.scalar_gaussian_variational_sample(
+        n_sample, log_ls_weight_mean, log_ls_weight_sdev)
+    ls_resid_sample = inference_util.scalar_gaussian_variational_sample(
+        n_sample, log_ls_resid_mean, log_ls_resid_sdev)
 
-    return weight_gp_sample_dict, temp_sample_dict, resid_gp_sample, sigma_sample
+    return (weight_gp_sample_dict, temp_sample_dict, resid_gp_sample,
+            sigma_sample, ls_weight_sample, ls_resid_sample)
 
 
 variational_mfvi = functools.partial(variational_family,

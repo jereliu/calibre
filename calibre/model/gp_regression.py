@@ -21,6 +21,7 @@ import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
 from tensorflow.python.ops.distributions.util import fill_triangular
 
+from calibre.util.matrix import replicate_along_zero_axis
 from calibre.model.gaussian_process import rbf
 
 tfd = tfp.distributions
@@ -43,7 +44,10 @@ def model(X, ls=1., ridge_factor=1e-4):
          (tf.Tensors of float32) model parameters.
     """
     N = X.shape[0]
-    K_mat = rbf(X, ls=ls, ridge_factor=ridge_factor)
+
+    ls = ed.Normal(loc=-5., scale=1., name='ls')
+
+    K_mat = rbf(X, ls=tf.exp(ls), ridge_factor=ridge_factor)
 
     gp_f = ed.MultivariateNormalTriL(loc=tf.zeros(N),
                                      scale_tril=tf.cholesky(K_mat),
@@ -54,7 +58,150 @@ def model(X, ls=1., ridge_factor=1e-4):
                                   scale_identity_multiplier=tf.exp(sigma),
                                   name="y")
 
-    return gp_f, sigma, y
+    return gp_f, sigma, y, ls
+
+
+def model_mixture(X, ls=1., n_mix=2, ridge_factor=1e-3):
+    """Defines the Gaussian Process Model.
+
+    Args:
+        X: (np.ndarray of float32) input training features.
+        with dimension (N, D).
+        ls: (float32) length scale parameter.
+        n_mix: (int8) Number of mixture components.
+        ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
+
+    Returns:
+         (tf.Tensors of float32) model parameters.
+    """
+    N = X.shape[0]
+    K_mat = rbf(X, ls=ls, ridge_factor=ridge_factor)
+
+    mix_prob = ed.Dirichlet(
+        concentration=tf.ones(n_mix, dtype=tf.float32) / n_mix,
+        name='mix_prob')
+
+    gp_f = ed.Independent(
+        distribution=tfd.MultivariateNormalTriL(
+            loc=tf.zeros(shape=[n_mix, N]),
+            scale_tril=replicate_along_zero_axis(tf.cholesky(K_mat), n_mix),
+        ),
+        reinterpreted_batch_ndims=1,
+        name="gp_f"
+    )
+
+    sigma = ed.Normal(loc=tf.ones(n_mix) * -5., scale=tf.ones(n_mix) * 1.,
+                      name='sigma')
+
+    y = ed.MixtureSameFamily(
+        components_distribution=tfd.MultivariateNormalDiag(
+            loc=gp_f, scale_identity_multiplier=tf.exp(sigma)),
+        mixture_distribution=tfd.Categorical(probs=mix_prob),
+        name="y")
+
+    return mix_prob, gp_f, sigma, y
+
+
+def model_mixture_adaptve(X, ls=1., n_mix=2, ridge_factor=1e-3):
+    """Defines the Daptive Mixture of Gaussian Process Model.
+
+    Args:
+        X: (np.ndarray of float32) input training features.
+        with dimension (N, D).
+        ls: (float32) length scale parameter.
+        n_mix: (int8) Number of mixture components.
+        ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
+
+    Returns:
+         (tf.Tensors of float32) model parameters.
+    """
+    N = X.shape[0]
+    K_mat = rbf(X, ls=ls, ridge_factor=ridge_factor)
+
+    gp_weight = ed.Independent(
+        distribution=tfd.MultivariateNormalTriL(
+            loc=tf.zeros(shape=[n_mix, N]),
+            scale_tril=replicate_along_zero_axis(tf.cholesky(K_mat), n_mix),
+        ),
+        reinterpreted_batch_ndims=1,
+        name="gp_w"
+    )
+    mix_member = ed.Multinomial(total_count=[1.],
+                                logits=tf.transpose(gp_weight),
+                                name="mix_prob")
+
+    gp_comp = ed.Independent(
+        distribution=tfd.MultivariateNormalTriL(
+            loc=tf.zeros(shape=[n_mix, N]),
+            scale_tril=replicate_along_zero_axis(tf.cholesky(K_mat), n_mix),
+        ),
+        reinterpreted_batch_ndims=1,
+        name="gp_f"
+    )
+
+    gp_f = tf.reduce_sum(tf.transpose(gp_comp) * mix_member, axis=-1)
+
+    sigma = ed.Normal(loc=-5., scale=1., name='sigma')
+
+    y = ed.MultivariateNormalDiag(loc=gp_f,
+                                  scale_identity_multiplier=tf.exp(sigma),
+                                  name="y")
+    # y = ed.MixtureSameFamily(
+    #     components_distribution=tfd.MultivariateNormalDiag(
+    #         loc=gp_comp, scale_identity_multiplier=tf.exp(sigma)),
+    #     mixture_distribution=tfd.Categorical(logits=gp_weight),
+    #     name="y")
+
+    return gp_weight, mix_member, gp_comp, sigma, y
+
+
+def model_mixture_adaptve2(X, ls=1., n_mix=2, ridge_factor=1e-3):
+    """Alternative representation using Mixture family.
+
+    Args:
+        X: (np.ndarray of float32) input training features.
+        with dimension (N, D).
+        ls: (float32) length scale parameter.
+        n_mix: (int8) Number of mixture components.
+        ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
+
+    Returns:
+         (tf.Tensors of float32) model parameters.
+    """
+    N = X.shape[0]
+    K_mat = rbf(X, ls=ls, ridge_factor=ridge_factor)
+
+    gp_weight = ed.Independent(
+        distribution=tfd.MultivariateNormalTriL(
+            loc=tf.zeros(shape=[n_mix, N]),
+            scale_tril=replicate_along_zero_axis(tf.cholesky(K_mat), n_mix),
+        ),
+        reinterpreted_batch_ndims=1,
+        name="gp_w"
+    )
+    mix_member = ed.Multinomial(total_count=[1.],
+                                logits=tf.transpose(gp_weight),
+                                name="mix_prob")
+
+    gp_comp = ed.Independent(
+        distribution=tfd.MultivariateNormalTriL(
+            loc=tf.zeros(shape=[n_mix, N]),
+            scale_tril=replicate_along_zero_axis(tf.cholesky(K_mat), n_mix),
+        ),
+        reinterpreted_batch_ndims=1,
+        name="gp_f"
+    )
+
+    sigma = ed.Normal(loc=tf.ones(n_mix)*-5.,
+                      scale=tf.ones(n_mix)*1., name='sigma')
+
+    y = ed.MixtureSameFamily(
+        components_distribution=tfd.MultivariateNormalDiag(
+            loc=gp_comp, scale_identity_multiplier=tf.exp(sigma)),
+        mixture_distribution=tfd.Categorical(logits=tf.transpose(gp_weight)),
+        name="y")
+
+    return gp_weight, mix_member, gp_comp, sigma, y
 
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""

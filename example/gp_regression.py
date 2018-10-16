@@ -14,26 +14,32 @@
         _arXiv preprint arXiv:1801.02939_, 2018.
         https://arxiv.org/pdf/1801.02939.pdf
 """
+"""Calibre (Adaptive Ensemble) with hierarchical structure using MCMC and Penalized VI. """
 import time
+
 import numpy as np
 
 import tensorflow as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
-
-from scipy import stats
 import gpflowSlim as gpf
+
+# sys.path.extend([os.getcwd()])
 
 from calibre.model import gaussian_process as gp
 from calibre.model import gp_regression
 
+import calibre.util.data as data_util
+
+from calibre.util.data import sin_curve_1d, cos_curve_1d, generate_1d_data
 from calibre.util.inference import make_value_setter
-from calibre.util.data import generate_1d_data, sin_curve_1d
 from calibre.util.visual import gpr_1d_visual
 
 import matplotlib.pyplot as plt
 
 tfd = tfp.distributions
+
+_MULTIMODAL_DATA = False
 
 """""""""""""""""""""""""""""""""
 # 1. Generate data
@@ -58,6 +64,7 @@ plt.plot(X_train.squeeze(), y_train.squeeze(),
          'o', c='red', markeredgecolor='black')
 plt.close()
 
+
 """""""""""""""""""""""""""""""""
 # 2. MCMC
 """""""""""""""""""""""""""""""""
@@ -73,14 +80,15 @@ with mcmc_graph.as_default():
     log_joint = ed.make_log_joint_fn(gp_regression.model)
 
 
-    def target_log_prob_fn(gp_f, sigma):
+    def target_log_prob_fn(gp_f, ls, sigma):
         """Unnormalized target density as a function of states."""
-        return log_joint(X_train, y=y_train, ls=ls_val, gp_f=gp_f, sigma=sigma)
+        return log_joint(X_train, y=y_train, gp_f=gp_f, ls=ls, sigma=sigma)
 
 
     # set up state container
     initial_state = [
         tf.random_normal([N], stddev=0.01, name='init_gp_func'),
+        tf.constant(0.1, name='init_ls'),
         tf.constant(0.1, name='init_sigma'),
     ]
 
@@ -106,7 +114,7 @@ with mcmc_graph.as_default():
         parallel_iterations=10
     )
 
-    gpf_sample, sigma_sample, = state
+    gpf_sample, ls_sample, sigma_sample, = state
 
     # set up init op
     init_op = tf.global_variables_initializer()
@@ -118,11 +126,13 @@ with tf.Session(graph=mcmc_graph) as sess:
     init_op.run()
     [
         f_samples_val,
+        ls_sample_val,
         sigma_sample_val,
         is_accepted_,
     ] = sess.run(
         [
             gpf_sample,
+            ls_sample,
             sigma_sample,
             kernel_results.is_accepted,
         ])
@@ -133,7 +143,8 @@ with tf.Session(graph=mcmc_graph) as sess:
 # prediction
 f_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
                                       f_sample=f_samples_val.T,
-                                      ls=ls_val, kernel_func=gp.rbf)
+                                      ls=np.mean(np.exp(ls_sample_val)),
+                                      kernel_func=gp.rbf)
 
 # visualize
 mu = np.mean(f_test_val, axis=1)
