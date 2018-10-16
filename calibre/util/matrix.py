@@ -41,4 +41,8 @@ def corr_mat(X, axis=0, N_max=5000):
     cov_mat = np.einsum('ijk,ijl->ikl', m1, m1) / (N - 1)
     sd_out = np.einsum('ijk,ijl->ikl', m1_sd, m1_sd)
 
-    return cov_mat/sd_out
+    return cov_mat / sd_out
+
+
+def replicate_along_zero_axis(A, n_replicate):
+    return tf.ones([n_replicate] + [1] * (len(A.shape))) * A

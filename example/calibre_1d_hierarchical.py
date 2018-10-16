@@ -8,6 +8,9 @@ import pickle as pk
 
 import numpy as np
 
+from sklearn.cluster import KMeans
+from sklearn.isotonic import IsotonicRegression
+
 import tensorflow as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
@@ -23,20 +26,20 @@ from calibre.calibration import score
 import calibre.util.visual as visual_util
 import calibre.util.matrix as matrix_util
 import calibre.util.data as data_util
+import calibre.util.gp_flow as gpf_util
+import calibre.util.calibration as calib_util
 
 from calibre.util.data import sin_curve_1d, cos_curve_1d
 from calibre.util.inference import make_value_setter
-from calibre.util.gp_flow import fit_base_gp_models, DEFAULT_KERN_FUNC_DICT
+from calibre.util.gp_flow import DEFAULT_KERN_FUNC_DICT_GPY, DEFAULT_KERN_FUNC_DICT_GPFLOW
 
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+# TODO(jereliu): adjust VI for ls_weight/ls_resid prior
 tfd = tfp.distributions
 
-_SAVE_ADDR_PREFIX = "./result/calibre_1d_tree"
-
-_MULTIMODAL_DATA = False
-_FIT_BASE_MODELS = True
+_FIT_BASE_MODELS = False
 _PLOT_COMPOSITION = False
 
 _EXAMPLE_DICTIONARY_SIMPLE = {
@@ -69,8 +72,8 @@ _EXAMPLE_DICTIONARY_FULL = {
     "poly": ["poly_1", "poly_2", "poly_3"]
 }
 
-DEFAULT_LS_WEIGHT = 0.2
-DEFAULT_LS_RESID = 0.2
+DEFAULT_LOG_LS_WEIGHT = np.log(0.15).astype(np.float32)
+DEFAULT_LOG_LS_RESID = np.log(0.2).astype(np.float32)
 
 """""""""""""""""""""""""""""""""
 # 1. Generate data
@@ -80,82 +83,61 @@ N_train = 20
 N_test = 20
 N_valid = 500
 
-if not _MULTIMODAL_DATA:
-    X_train, y_train = data_util.generate_1d_data(N=N_train, f=sin_curve_1d,
-                                                  noise_sd=0.03, seed=1000,
-                                                  uniform_x=True)
-    X_test, y_test = data_util.generate_1d_data(N=N_test, f=sin_curve_1d,
-                                                noise_sd=0.03, seed=1500,
-                                                uniform_x=True,
-                                                )
+_SAVE_ADDR_PREFIX = "./result/calibre_1d_tree"
+data_range = [0., 1.]
+X_train, y_train = data_util.generate_1d_data(N=N_train, f=sin_curve_1d,
+                                              noise_sd=0.03, seed=1000,
+                                              uniform_x=True,
+                                              uniform_x_range=data_range)
+X_test, y_test = data_util.generate_1d_data(N=N_test, f=sin_curve_1d,
+                                            noise_sd=0.03, seed=1500,
+                                            uniform_x=True,
+                                            uniform_x_range=data_range)
 
-    X_train = np.expand_dims(X_train, 1).astype(np.float32)
-    y_train = y_train.astype(np.float32)
-    X_test = np.expand_dims(X_test, 1).astype(np.float32)
-    y_test = y_test.astype(np.float32)
+X_train = np.expand_dims(X_train, 1).astype(np.float32)
+y_train = y_train.astype(np.float32)
+X_test = np.expand_dims(X_test, 1).astype(np.float32)
+y_test = y_test.astype(np.float32)
 
-    std_y_train = np.std(y_train)
+std_y_train = np.std(y_train)
 
-    X_valid = np.expand_dims(np.linspace(-0.5, 1.5, N_valid), 1).astype(np.float32)
-    y_valid = sin_curve_1d(X_valid)
+X_valid = np.expand_dims(np.linspace(-0.5, 1.5, N_valid), 1).astype(np.float32)
+y_valid = sin_curve_1d(X_valid)
 
-    N, D = X_train.shape
+N, D = X_train.shape
 
-    #
-    plt.plot(np.linspace(-0.5, 1.5, 100),
-             sin_curve_1d(np.linspace(-0.5, 1.5, 100)), c='black')
-    plt.plot(X_train.squeeze(), y_train.squeeze(),
-             'o', c='red', markeredgecolor='black')
-    plt.plot(X_test.squeeze(), y_test.squeeze(),
-             'o', c='blue', markeredgecolor='black')
-    plt.close()
+np.random.seed(100)
+calib_sample_id = np.where((X_valid > data_range[0]) &
+                           (X_valid <= data_range[1]))[0]
+calib_sample_id = np.random.choice(len(calib_sample_id),
+                                   size=len(calib_sample_id))
 
-else:
-    X_train, y_train = data_util.generate_1d_data_multimodal(
-        N=N_train, f_list=[sin_curve_1d, cos_curve_1d],
-        noise_sd=0.01, seed=1000,
-        uniform_x=True)
-    X_test, y_test = data_util.generate_1d_data_multimodal(
-        N=N_test, f_list=[sin_curve_1d, cos_curve_1d],
-        noise_sd=0.01, seed=2000,
-        uniform_x=True)
-
-    X_train = np.expand_dims(X_train, 1).astype(np.float32)
-    y_train = y_train.astype(np.float32)
-    X_test = np.expand_dims(X_test, 1).astype(np.float32)
-    y_test = y_test.astype(np.float32)
-
-    std_y_train = np.std(y_train)
-
-    X_valid = np.expand_dims(np.linspace(-1, 2, N_valid), 1).astype(np.float32)
-    y_valid = np.concatenate([sin_curve_1d(X_valid), cos_curve_1d(X_valid)])
-    X_valid = np.concatenate([X_valid, X_valid])
-
-    N, D = X_train.shape
-
-    #
-    plt.plot(np.linspace(-0.5, 1.5, 100),
-             sin_curve_1d(np.linspace(-0.5, 1.5, 100)), c='black')
-    plt.plot(np.linspace(-0.5, 1.5, 100),
-             cos_curve_1d(np.linspace(-0.5, 1.5, 100)), c='black')
-    plt.plot(X_train.squeeze(), y_train.squeeze(),
-             'o', c='red', markeredgecolor='black')
-    plt.plot(X_test.squeeze(), y_test.squeeze(),
-             'o', c='blue', markeredgecolor='black')
-    plt.close()
+#
+plt.plot(np.linspace(-0.5, 1.5, 100),
+         sin_curve_1d(np.linspace(-0.5, 1.5, 100)), c='black')
+plt.plot(X_train.squeeze(), y_train.squeeze(),
+         'o', c='red', markeredgecolor='black')
+plt.plot(X_test.squeeze(), y_test.squeeze(),
+         'o', c='blue', markeredgecolor='black')
+plt.close()
 
 """ 1.1. Build base GP models using GPflow """
 if _FIT_BASE_MODELS:
-    fit_base_gp_models(X_train, y_train,
-                       X_test, y_test,
-                       X_valid, y_valid,
-                       kern_func_dict=DEFAULT_KERN_FUNC_DICT,
-                       n_valid_sample=500,
-                       save_addr_prefix="{}/base".format(_SAVE_ADDR_PREFIX))
+    gpf_util.fit_base_gp_models(X_train, y_train,
+                                X_test, y_test,
+                                X_valid, y_valid,
+                                kern_func_dict=DEFAULT_KERN_FUNC_DICT_GPFLOW,
+                                n_valid_sample=500,
+                                save_addr_prefix="{}/base".format(_SAVE_ADDR_PREFIX),
+                                )
 
 """""""""""""""""""""""""""""""""
 # 2. MCMC
 """""""""""""""""""""""""""""""""
+family_name = "hmc"
+family_name_full = "Hamilton MC"
+
+_SAVE_ADDR = _SAVE_ADDR_PREFIX
 with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_test_pred.pkl'), 'rb') as file:
     base_test_pred = pk.load(file)
 
@@ -163,12 +145,16 @@ with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_valid_pred.pkl'), 'rb') as 
     base_valid_pred = pk.load(file)
 
 """2.1. sampler basic config"""
+y_test = y_test[:100].astype(np.float32)
+X_test = X_test[:100].astype(np.float32)
+
 N = X_test.shape[0]
 K = len(base_test_pred)
+
 family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 
-num_results = 10000
-num_burnin_steps = 10000
+num_results = 5000
+num_burnin_steps = 5000
 
 # define mcmc computation graph
 mcmc_graph = tf.Graph()
@@ -186,7 +172,8 @@ with mcmc_graph.as_default():
     node_specific_varnames = cond_weight_temp_names + node_weight_names
 
 
-    def target_log_prob_fn(sigma, ensemble_resid,
+    def target_log_prob_fn(sigma,
+                           ensemble_resid,
                            *node_specific_positional_args):
         """Unnormalized target density as a function of states."""
         # build kwargs for base model weight using positional args
@@ -196,9 +183,9 @@ with mcmc_graph.as_default():
         return log_joint(X=X_test,
                          base_pred=base_test_pred,
                          family_tree=family_tree_dict,
-                         ls_weight=DEFAULT_LS_WEIGHT,
-                         ls_resid=DEFAULT_LS_RESID,
                          y=y_test.squeeze(),
+                         ls_weight=DEFAULT_LOG_LS_WEIGHT,
+                         ls_resid=DEFAULT_LOG_LS_RESID,
                          sigma=sigma,
                          ensemble_resid=ensemble_resid,
                          **node_specific_kwargs)
@@ -272,25 +259,39 @@ with tf.Session(graph=mcmc_graph) as sess:
     print('Acceptance Rate: {}'.format(np.mean(is_accepted_)))
     sess.close()
 
-with open(os.path.join(_SAVE_ADDR_PREFIX, 'hmc/sigma_sample.pkl'), 'wb') as file:
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/sigma_sample.pkl'.format(family_name)), 'wb') as file:
     pk.dump(sigma_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
-with open(os.path.join(_SAVE_ADDR_PREFIX, 'hmc/temp_sample.pkl'), 'wb') as file:
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/temp_sample.pkl'.format(family_name)), 'wb') as file:
     pk.dump(temp_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
-with open(os.path.join(_SAVE_ADDR_PREFIX, 'hmc/weight_sample.pkl'), 'wb') as file:
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/weight_sample.pkl'.format(family_name)), 'wb') as file:
     pk.dump(weight_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
-with open(os.path.join(_SAVE_ADDR_PREFIX, 'hmc/ensemble_resid_sample.pkl'), 'wb') as file:
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/ensemble_resid_sample.pkl'.format(family_name)), 'wb') as file:
     pk.dump(resid_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
 """ 2.3. prediction and visualization"""
 
-with open(os.path.join(_SAVE_ADDR_PREFIX, 'hmc/sigma_sample.pkl'), 'rb') as file:
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/sigma_sample.pkl'.format(family_name)), 'rb') as file:
     sigma_sample_val = pk.load(file)
-with open(os.path.join(_SAVE_ADDR_PREFIX, 'hmc/temp_sample.pkl'), 'rb') as file:
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/temp_sample.pkl'.format(family_name)), 'rb') as file:
     temp_sample_val = pk.load(file)
-with open(os.path.join(_SAVE_ADDR_PREFIX, 'hmc/weight_sample.pkl'), 'rb') as file:
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/weight_sample.pkl'.format(family_name)), 'rb') as file:
     weight_sample_val = pk.load(file)
-with open(os.path.join(_SAVE_ADDR_PREFIX, 'hmc/ensemble_resid_sample.pkl'), 'rb') as file:
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/ensemble_resid_sample.pkl'.format(family_name)), 'rb') as file:
     resid_sample_val = pk.load(file)
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/ensemble_ls_resid_sample.pkl'.format(family_name)), 'rb') as file:
+    ls_weight_sample_val = pk.load(file)
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/ensemble_ls_weight_sample.pkl'.format(family_name)), 'rb') as file:
+    ls_resid_sample_val = pk.load(file)
 
 """ 2.3.1. prediction """
 # compute GP prediction for weight GP and residual GP
@@ -299,14 +300,15 @@ for model_weight_sample in weight_sample_val:
     model_weight_valid_sample.append(
         gp.sample_posterior_full(X_new=X_valid, X=X_test,
                                  f_sample=model_weight_sample.T,
-                                 ls=DEFAULT_LS_WEIGHT,
+                                 ls=np.exp(DEFAULT_LOG_LS_WEIGHT),
                                  kernel_func=gp.rbf).T.astype(np.float32)
     )
 
 ensemble_resid_valid_sample = (
     gp.sample_posterior_full(X_new=X_valid, X=X_test,
                              f_sample=resid_sample_val.T,
-                             ls=DEFAULT_LS_RESID, kernel_func=gp.rbf).T
+                             ls=np.exp(DEFAULT_LOG_LS_RESID),
+                             kernel_func=gp.rbf).T
 )
 
 # compute sample for posterior mean
@@ -317,14 +319,10 @@ parent_temp_dict = dict(zip(tail_free.get_parent_node_names(family_tree_dict),
 
 (ensemble_sample_val, ensemble_mean_val,
  ensemble_weights_val, cond_weights_dict_val, ensemble_model_names) = (
-    adaptive_ensemble.sample_posterior_tailfree(
-        X=X_valid,
-        base_pred_dict=base_valid_pred,
-        family_tree=family_tree_dict,
-        weight_gp_dict=raw_weights_dict,
-        temp_dict=parent_temp_dict,
-        resid_gp_sample=ensemble_resid_valid_sample,
-        ls_weight=DEFAULT_LS_WEIGHT, ))
+    adaptive_ensemble.sample_posterior_tailfree(X=X_valid, base_pred_dict=base_valid_pred, family_tree=family_tree_dict,
+                                                weight_gp_dict=raw_weights_dict, temp_dict=parent_temp_dict,
+                                                resid_gp_sample=ensemble_resid_valid_sample,
+                                                log_ls_weight=DEFAULT_LOG_LS_WEIGHT))
 
 # compute covariance matrix among model weights
 model_weights_raw = np.asarray([raw_weights_dict[model_name]
@@ -333,44 +331,44 @@ model_weights_raw = np.swapaxes(model_weights_raw, 0, -1)
 ensemble_weight_corr = matrix_util.corr_mat(model_weights_raw, axis=0)
 
 with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       'hmc/ensemble_posterior_mean_sample.pkl'), 'wb') as file:
+                       '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'wb') as file:
     pk.dump(ensemble_mean_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
 with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       'hmc/ensemble_posterior_dist_sample.pkl'), 'wb') as file:
+                       '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'wb') as file:
     pk.dump(ensemble_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
 with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       'hmc/ensemble_posterior_node_weight_dict.pkl'), 'wb') as file:
+                       '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'wb') as file:
     pk.dump(cond_weights_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
 with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       'hmc/ensemble_posterior_model_weights.pkl'), 'wb') as file:
+                       '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'wb') as file:
     pk.dump(ensemble_weights_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
 with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       'hmc/ensemble_posterior_model_weights_corr.pkl'), 'wb') as file:
+                       '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'wb') as file:
     pk.dump(ensemble_weight_corr, file, protocol=pk.HIGHEST_PROTOCOL)
 
 """ 2.3.2. visualize: base prediction """
 with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       'hmc/ensemble_posterior_mean_sample.pkl'), 'rb') as file:
+                       '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'rb') as file:
     ensemble_mean_val = pk.load(file)
 
 with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       'hmc/ensemble_posterior_dist_sample.pkl'), 'rb') as file:
+                       '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'rb') as file:
     ensemble_sample_val = pk.load(file)
 
 with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       'hmc/ensemble_posterior_node_weight_dict.pkl'), 'rb') as file:
+                       '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'rb') as file:
     cond_weights_dict_val = pk.load(file)
 
 with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       'hmc/ensemble_posterior_model_weights.pkl'), 'rb') as file:
+                       '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'rb') as file:
     ensemble_weights_val = pk.load(file)
 
 with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       'hmc/ensemble_posterior_model_weights_corr.pkl'), 'rb') as file:
+                       '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'rb') as file:
     ensemble_weight_corr = pk.load(file)
 
 base_pred_dict = {key: value for key, value in base_valid_pred.items()
@@ -380,7 +378,8 @@ visual_util.plot_base_prediction(base_pred=base_pred_dict,
                                  X_valid=X_valid, y_valid=y_valid,
                                  X_train=X_train, y_train=y_train,
                                  save_addr=os.path.join(
-                                     _SAVE_ADDR_PREFIX, "hmc/ensemble_base_model_fit.png"))
+                                     _SAVE_ADDR_PREFIX,
+                                     "{}/ensemble_base_model_fit.png".format(family_name)))
 
 """ 2.3.3. visualize: ensemble posterior predictive mean """
 
@@ -398,9 +397,9 @@ visual_util.gpr_1d_visual(posterior_mean_mu,
                           pred_cov=posterior_mean_cov,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Mean, Hamilton MC",
+                          title="Ensemble Posterior Mean, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "hmc/ensemble_posterior_mean.png")
+                                                 "{}/ensemble_posterior_mean.png".format(family_name))
                           )
 
 visual_util.gpr_1d_visual(posterior_mean_median,
@@ -408,18 +407,18 @@ visual_util.gpr_1d_visual(posterior_mean_median,
                           pred_quantiles=posterior_mean_quantiles,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Mean Quantiles, Hamilton MC",
+                          title="Ensemble Posterior Mean Quantiles, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "hmc/ensemble_posterior_mean_quantile.png")
+                                                 "{}/ensemble_posterior_mean_quantile.png".format(family_name))
                           )
 
 visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
                           pred_samples=list(ensemble_mean_val)[:2500],
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Samples, Hamilton MC",
+                          title="Ensemble Posterior Samples, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "hmc/ensemble_posterior_sample.png")
+                                                 "{}/ensemble_posterior_sample.png".format(family_name))
                           )
 
 """ 2.3.4. visualize: ensemble residual """
@@ -438,9 +437,9 @@ visual_util.gpr_1d_visual(posterior_resid_mu,
                           pred_cov=posterior_resid_cov,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual, Hamilton MC",
+                          title="Ensemble Posterior Residual, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "hmc/ensemble_posterior_resid.png")
+                                                 "{}/ensemble_posterior_resid.png".format(family_name))
                           )
 
 visual_util.gpr_1d_visual(posterior_resid_median,
@@ -448,18 +447,18 @@ visual_util.gpr_1d_visual(posterior_resid_median,
                           pred_quantiles=posterior_resid_quantiles,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual Quantiles, Hamilton MC",
+                          title="Ensemble Posterior Residual Quantiles, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "hmc/ensemble_posterior_resid_quantile.png")
+                                                 "{}/ensemble_posterior_resid_quantile.png".format(family_name))
                           )
 
 visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
                           pred_samples=list(ensemble_resid_valid_sample)[:2500],
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual Samples, Hamilton MC",
+                          title="Ensemble Posterior Residual Samples, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "hmc/ensemble_posterior_resid_sample.png")
+                                                 "{}/ensemble_posterior_resid_sample.png".format(family_name))
                           )
 
 """ 2.3.5. visualize: ensemble posterior full """
@@ -478,9 +477,9 @@ visual_util.gpr_1d_visual(posterior_dist_mu,
                           pred_cov=posterior_dist_cov,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Predictive, Hamilton MC",
+                          title="Ensemble Posterior Predictive, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "hmc/ensemble_posterior_full.png")
+                                                 "{}/ensemble_posterior_full.png".format(family_name))
                           )
 
 visual_util.gpr_1d_visual(posterior_dist_median,
@@ -488,43 +487,56 @@ visual_util.gpr_1d_visual(posterior_dist_median,
                           pred_quantiles=posterior_dist_quantiles,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Predictive Quantiles, Hamilton MC",
+                          title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "hmc/ensemble_posterior_full_quantile.png")
+                                                 "{}/ensemble_posterior_full_quantile.png".format(family_name))
                           )
 visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
                           pred_samples=list(ensemble_sample_val)[:2500],
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Predictive Samples, Hamilton MC",
+                          title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "hmc/ensemble_posterior_full_sample.png")
+                                                 "{}/ensemble_posterior_full_sample.png".format(family_name))
+                          )
+
+visual_util.gpr_1d_visual(pred_mean=posterior_dist_median,
+                          pred_cov=None,
+                          pred_quantiles=[
+                              [posterior_dist_median - 3 * np.sqrt(posterior_mean_cov),
+                               posterior_dist_median + 3 * np.sqrt(posterior_mean_cov)],
+                              [posterior_dist_median - 3 * np.sqrt(posterior_dist_cov),
+                               posterior_dist_median + 3 * np.sqrt(posterior_dist_cov)],
+                          ],
+                          X_train=X_test, y_train=y_test,
+                          X_test=X_valid, y_test=y_valid,
+                          quantile_colors=["red", "black"],
+                          quantile_alpha=0.2,
+                          title="Ensemble Posterior, Uncertainty Decomposition, {}".format(family_name_full),
+                          save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                 "{}/ensemble_posterior_unc_decomp.png".format(family_name))
                           )
 
 """ 2.3.6. visualize: ensemble posterior reliability """
+y_calib = y_valid[calib_sample_id]
+y_sample_calib = ensemble_sample_val[:, calib_sample_id].T
 
 visual_util.prob_calibration_1d(
-    y_valid, ensemble_sample_val.T,
-    title="Ensemble, Hamilton MC",
+    y_calib, y_sample_calib,
+    title="Ensemble, {}".format(family_name_full),
     save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                           "hmc/ensemble_calibration_prob.png"))
-
-visual_util.marginal_calibration_1d(
-    y_valid, ensemble_sample_val.T,
-    title="Ensemble, Hamilton MC",
-    save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                           "hmc/ensemble_calibration_marginal.png"))
+                           "{}/ensemble_calibration_prob.png".format(family_name)))
 
 """ 2.3.7. visualize: base ensemble weight with uncertainty """
 visual_util.plot_ensemble_weight_mean_1d(X=X_valid, weight_sample=ensemble_weights_val,
                                          model_names=ensemble_model_names,
                                          save_addr_prefix=os.path.join(
-                                             _SAVE_ADDR_PREFIX, "hmc/ensemble_model"))
+                                             _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
 
 visual_util.plot_ensemble_weight_median_1d(X=X_valid, weight_sample=ensemble_weights_val,
                                            model_names=ensemble_model_names,
                                            save_addr_prefix=os.path.join(
-                                               _SAVE_ADDR_PREFIX, "hmc/ensemble_model"))
+                                               _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
 
 # model family weights
 ensemble_weights_family = np.stack(
@@ -533,12 +545,12 @@ visual_util.plot_ensemble_weight_mean_1d(X=X_valid,
                                          weight_sample=ensemble_weights_family,
                                          model_names=family_tree_dict['root'],
                                          save_addr_prefix=os.path.join(
-                                             _SAVE_ADDR_PREFIX, "hmc/ensemble_family"))
+                                             _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
 visual_util.plot_ensemble_weight_median_1d(X=X_valid,
                                            weight_sample=ensemble_weights_family,
                                            model_names=family_tree_dict['root'],
                                            save_addr_prefix=os.path.join(
-                                               _SAVE_ADDR_PREFIX, "hmc/ensemble_family"))
+                                               _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
 
 """ 2.3.8. visualize: ensemble weight covariance (model compositionality) """
 if _PLOT_COMPOSITION:
@@ -573,407 +585,418 @@ n_inference_sample = 100
 n_final_sample = 10000  # number of samples to collect from variational family
 max_steps = 20000  # number of training iterations
 
-family_name = "mfvi"
+for family_name in ["mfvi", "sgpr"]:
+    if family_name == "mfvi":
+        family_name_full = "Mean-field VI"
+        ensemble_variational_family = adaptive_ensemble.variational_mfvi
+        ensemble_variational_family_sample = adaptive_ensemble.variational_mfvi_sample
+    elif family_name == "sgpr":
+        family_name_full = "Sparse Gaussian Process"
+        ensemble_variational_family = adaptive_ensemble.variational_sgpr
+        ensemble_variational_family_sample = adaptive_ensemble.variational_sgpr_sample
 
-if family_name == "mfvi":
-    family_name_full = "Mean-field VI"
-    ensemble_variational_family = adaptive_ensemble.variational_mfvi
-    ensemble_variational_family_sample = adaptive_ensemble.variational_mfvi_sample
-elif family_name == "sgpr":
-    family_name_full = "Sparse Gaussian Process"
-    ensemble_variational_family = adaptive_ensemble.variational_sgpr
-    ensemble_variational_family_sample = adaptive_ensemble.variational_sgpr_sample
+    """ 3.2. Set up the computational graph """
+    vi_graph = tf.Graph()
 
-""" 3.2. Set up the computational graph """
-vi_graph = tf.Graph()
+    with vi_graph.as_default():
+        # sample from variational family
+        (weight_gp_dict, resid_gp, temp_dict, sigma, _, _,  # variational RVs
+         weight_gp_mean_dict, weight_gp_vcov_dict,  # variational parameters, weight GP
+         resid_gp_mean, resid_gp_vcov,  # resid GP variational parameters
+         temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
+         sigma_mean, sigma_sdev,  # variational parameters, resid GP
+         ) = ensemble_variational_family(X=X_test,
+                                         Z=X_induce,
+                                         base_pred=base_test_pred,
+                                         family_tree=family_tree_dict,
+                                         log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
+                                         log_ls_resid=DEFAULT_LOG_LS_RESID,
+                                         kernel_func=gp.rbf,
+                                         ridge_factor=1e-3)
 
-with vi_graph.as_default():
-    # sample from variational family
-    (weight_gp_dict, resid_gp, temp_dict, sigma,  # variational RVs
-     weight_gp_mean_dict, weight_gp_vcov_dict,  # variational parameters, weight GP
-     resid_gp_mean, resid_gp_vcov,  # resid GP variational parameters
-     temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
-     sigma_mean, sigma_sdev  # variational parameters, resid GP
-     ) = ensemble_variational_family(X=X_test,
-                                     Z=X_induce,
-                                     base_pred=base_test_pred,
-                                     family_tree=family_tree_dict,
-                                     ls_weight=DEFAULT_LS_WEIGHT,
-                                     ls_resid=DEFAULT_LS_RESID,
-                                     kernel_func=gp.rbf,
-                                     ridge_factor=1e-3)
+        # assemble kwargs for make_value_setter
+        variational_rv_dict = {"ensemble_resid": resid_gp, "sigma": sigma, }
+        variational_rv_dict.update(temp_dict)
+        variational_rv_dict.update(weight_gp_dict)
 
-    # assemble kwargs for make_value_setter
-    variational_rv_dict = {"ensemble_resid": resid_gp, "sigma": sigma, }
-    variational_rv_dict.update(temp_dict)
-    variational_rv_dict.update(weight_gp_dict)
+        # compute the expected predictive log-likelihood
+        with ed.tape() as model_tape:
+            with ed.interception(make_value_setter(**variational_rv_dict)):
+                y = adaptive_ensemble.model_tailfree(X=X_test, base_pred=base_test_pred, family_tree=family_tree_dict,
+                                                     log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
+                                                     log_ls_resid=DEFAULT_LOG_LS_RESID, kernel_func=gp.rbf,
+                                                     ridge_factor=1e-3)
 
-    # compute the expected predictive log-likelihood
-    with ed.tape() as model_tape:
-        with ed.interception(make_value_setter(**variational_rv_dict)):
-            y = adaptive_ensemble.model_tailfree(
-                X=X_test,
-                base_pred=base_test_pred,
-                family_tree=family_tree_dict,
-                ls_weight=DEFAULT_LS_WEIGHT,
-                ls_resid=DEFAULT_LS_RESID,
-                kernel_func=gp.rbf,
-                ridge_factor=1e-3)
+        log_likelihood = y.distribution.log_prob(y_test)
 
-    log_likelihood = y.distribution.log_prob(y_test)
+        # compute the KL divergence
+        kl = 0.
+        for rv_name, variational_rv in variational_rv_dict.items():
+            kl += tf.reduce_sum(
+                variational_rv.distribution.kl_divergence(
+                    model_tape[rv_name].distribution)
+            )
 
-    # compute the KL divergence
-    kl = 0.
-    for rv_name, variational_rv in variational_rv_dict.items():
-        kl += tf.reduce_sum(
-            variational_rv.distribution.kl_divergence(
-                model_tape[rv_name].distribution)
-        )
+        # define loss op: ELBO = E_q(p(x|z)) + KL(q || p)
+        elbo = tf.reduce_mean(log_likelihood - kl)
 
-    # define loss op: ELBO = E_q(p(x|z)) + KL(q || p)
-    elbo = tf.reduce_mean(log_likelihood - kl)
+        # define optimizer
+        optimizer = tf.train.AdamOptimizer(5e-3)
+        train_op = optimizer.minimize(-elbo)
 
-    # define optimizer
-    optimizer = tf.train.AdamOptimizer(5e-3)
-    train_op = optimizer.minimize(-elbo)
+        # define init op
+        init_op = tf.global_variables_initializer()
 
-    # define init op
-    init_op = tf.global_variables_initializer()
+        vi_graph.finalize()
 
-    vi_graph.finalize()
+    """ 3.3. execute optimization, then sample from variational family """
 
-""" 3.3. execute optimization, then sample from variational family """
-
-with tf.Session(graph=vi_graph) as sess:
-    start_time = time.time()
-
-    sess.run(init_op)
-    for step in range(max_steps):
+    with tf.Session(graph=vi_graph) as sess:
         start_time = time.time()
-        _, elbo_value, = sess.run([train_op, elbo])
-        if step % 500 == 0:
-            duration = time.time() - start_time
-            print("Step: {:>3d} ELBO: {:.3f}, ({:.3f} sec)".format(
-                step, elbo_value, duration))
 
-    (weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
-     resid_gp_mean_val, resid_gp_vcov_val,
-     temp_mean_dict_val, temp_sdev_dict_val,
-     sigma_mean_val, sigma_sdev_val) = sess.run([
-        weight_gp_mean_dict, weight_gp_vcov_dict,
-        resid_gp_mean, resid_gp_vcov,
-        temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
-        sigma_mean, sigma_sdev])
+        sess.run(init_op)
+        for step in range(max_steps):
+            start_time = time.time()
+            _, elbo_value, = sess.run([train_op, elbo])
+            if step % 500 == 0:
+                duration = time.time() - start_time
+                print("Step: {:>3d} ELBO: {:.3f}, ({:.3f} sec)".format(
+                    step, elbo_value, duration))
 
-    sess.close()
+        (weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
+         resid_gp_mean_val, resid_gp_vcov_val,
+         temp_mean_dict_val, temp_sdev_dict_val,
+         sigma_mean_val, sigma_sdev_val) = sess.run([
+            weight_gp_mean_dict, weight_gp_vcov_dict,
+            resid_gp_mean, resid_gp_vcov,
+            temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
+            sigma_mean, sigma_sdev])
 
-with tf.Session() as sess:
-    (weight_gp_sample_dict, temp_sample_dict,
-     resid_gp_sample, sigma_sample) = (
-        ensemble_variational_family_sample(
-            n_final_sample,
-            weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
-            temp_mean_dict_val, temp_sdev_dict_val,
-            resid_gp_mean_val, resid_gp_vcov_val,
-            sigma_mean_val, sigma_sdev_val))
+        sess.close()
 
-    (weight_gp_sample_dict_val, temp_sample_dict_val,
-     resid_gp_sample_val, sigma_sample_val) = sess.run([
-        weight_gp_sample_dict, temp_sample_dict,
-        resid_gp_sample, sigma_sample])
+    with tf.Session() as sess:
+        (weight_gp_sample_dict, temp_sample_dict,
+         resid_gp_sample, sigma_sample, _, _) = (
+            ensemble_variational_family_sample(
+                n_final_sample,
+                weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
+                temp_mean_dict_val, temp_sdev_dict_val,
+                resid_gp_mean_val, resid_gp_vcov_val,
+                sigma_mean_val, sigma_sdev_val,
+                log_ls_weight_mean=DEFAULT_LOG_LS_WEIGHT,
+                log_ls_weight_sdev=.01,
+                log_ls_resid_mean=DEFAULT_LOG_LS_WEIGHT,
+                log_ls_resid_sdev=.01
+            ))
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/sigma_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(sigma_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/temp_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(temp_sample_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/weight_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(weight_gp_sample_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_resid_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(resid_gp_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+        (weight_gp_sample_dict_val, temp_sample_dict_val,
+         resid_gp_sample_val, sigma_sample_val) = sess.run([
+            weight_gp_sample_dict, temp_sample_dict,
+            resid_gp_sample, sigma_sample])
 
-""" 3.5. prediction and posterior sampling """
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/sigma_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(sigma_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/temp_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(temp_sample_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/weight_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(weight_gp_sample_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_resid_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(resid_gp_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/sigma_sample.pkl'.format(family_name)), 'rb') as file:
-    sigma_sample_val = pk.load(file)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/temp_sample.pkl'.format(family_name)), 'rb') as file:
-    temp_sample_dict_val = pk.load(file)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/weight_sample.pkl'.format(family_name)), 'rb') as file:
-    weight_gp_sample_dict_val = pk.load(file)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_resid_sample.pkl'.format(family_name)), 'rb') as file:
-    resid_gp_sample_val = pk.load(file)
+    """ 3.5. prediction and posterior sampling """
 
-# compute GP prediction for weight GP and residual GP
-raw_weights_dict = dict()
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/sigma_sample.pkl'.format(family_name)), 'rb') as file:
+        sigma_sample_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/temp_sample.pkl'.format(family_name)), 'rb') as file:
+        temp_sample_dict_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/weight_sample.pkl'.format(family_name)), 'rb') as file:
+        weight_gp_sample_dict_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_resid_sample.pkl'.format(family_name)), 'rb') as file:
+        resid_gp_sample_val = pk.load(file)
 
-for model_name, model_weight_sample in weight_gp_sample_dict_val.items():
-    # extract node name and verify correctness
-    node_name = model_name.replace("{}_".format(tail_free.BASE_WEIGHT_NAME_PREFIX), "")
-    assert node_name in tail_free.get_nonroot_node_names(family_tree_dict)
+    # compute GP prediction for weight GP and residual GP
+    raw_weights_dict = dict()
 
-    raw_weights_dict[node_name] = (
+    for model_name, model_weight_sample in weight_gp_sample_dict_val.items():
+        # extract node name and verify correctness
+        node_name = model_name.replace("{}_".format(tail_free.BASE_WEIGHT_NAME_PREFIX), "")
+        assert node_name in tail_free.get_nonroot_node_names(family_tree_dict)
+
+        raw_weights_dict[node_name] = (
+            gp.sample_posterior_full(X_new=X_valid, X=X_test,
+                                     f_sample=model_weight_sample.T,
+                                     ls=np.exp(DEFAULT_LOG_LS_WEIGHT),
+                                     kernel_func=gp.rbf).T.astype(np.float32))
+
+    ensemble_resid_valid_sample = (
         gp.sample_posterior_full(X_new=X_valid, X=X_test,
-                                 f_sample=model_weight_sample.T,
-                                 ls=DEFAULT_LS_WEIGHT,
-                                 kernel_func=gp.rbf).T.astype(np.float32))
+                                 f_sample=resid_gp_sample_val.T,
+                                 ls=np.exp(DEFAULT_LOG_LS_RESID),
+                                 kernel_func=gp.rbf).T
+    )
 
-ensemble_resid_valid_sample = (
-    gp.sample_posterior_full(X_new=X_valid, X=X_test,
-                             f_sample=resid_gp_sample_val.T,
-                             ls=DEFAULT_LS_RESID, kernel_func=gp.rbf).T
-)
+    # prepare temperature dictionary
+    parent_temp_dict = dict()
+    for model_name, parent_temp_sample in temp_sample_dict_val.items():
+        # extract node name and verify correctness
+        node_name = model_name.replace("{}_".format(tail_free.TEMP_NAME_PREFIX), "")
+        assert node_name in tail_free.get_parent_node_names(family_tree_dict)
 
-# prepare temperature dictionary
-parent_temp_dict = dict()
-for model_name, parent_temp_sample in temp_sample_dict_val.items():
-    # extract node name and verify correctness
-    node_name = model_name.replace("{}_".format(tail_free.TEMP_NAME_PREFIX), "")
-    assert node_name in tail_free.get_parent_node_names(family_tree_dict)
+        parent_temp_dict[node_name] = parent_temp_sample
 
-    parent_temp_dict[node_name] = parent_temp_sample
+    # compute sample for posterior mean
+    (ensemble_sample_val, ensemble_mean_val,
+     ensemble_weights_val, cond_weights_dict_val, ensemble_model_names) = (
+        adaptive_ensemble.sample_posterior_tailfree(X=X_valid, base_pred_dict=base_valid_pred,
+                                                    family_tree=family_tree_dict, weight_gp_dict=raw_weights_dict,
+                                                    temp_dict=parent_temp_dict,
+                                                    resid_gp_sample=ensemble_resid_valid_sample,
+                                                    log_ls_weight=DEFAULT_LOG_LS_WEIGHT))
 
-# compute sample for posterior mean
-(ensemble_sample_val, ensemble_mean_val,
- ensemble_weights_val, cond_weights_dict_val, ensemble_model_names) = (
-    adaptive_ensemble.sample_posterior_tailfree(
-        X=X_valid,
-        base_pred_dict=base_valid_pred,
-        family_tree=family_tree_dict,
-        weight_gp_dict=raw_weights_dict,
-        temp_dict=parent_temp_dict,
-        resid_gp_sample=ensemble_resid_valid_sample,
-        ls_weight=DEFAULT_LS_WEIGHT, ))
+    # compute covariance matrix among model weights
+    model_weights_raw = np.asarray([raw_weights_dict[model_name]
+                                    for model_name in ensemble_model_names])
+    model_weights_raw = np.swapaxes(model_weights_raw, 0, -1)
+    ensemble_weight_corr = matrix_util.corr_mat(model_weights_raw, axis=0)
 
-# compute covariance matrix among model weights
-model_weights_raw = np.asarray([raw_weights_dict[model_name]
-                                for model_name in ensemble_model_names])
-model_weights_raw = np.swapaxes(model_weights_raw, 0, -1)
-ensemble_weight_corr = matrix_util.corr_mat(model_weights_raw, axis=0)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_mean_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(ensemble_mean_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(ensemble_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(cond_weights_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(cond_weights_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_weights_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(ensemble_weights_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_weight_corr, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(ensemble_weight_corr, file, protocol=pk.HIGHEST_PROTOCOL)
+    """ 3.5.2. visualize: base prediction """
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'rb') as file:
+        ensemble_mean_val = pk.load(file)
 
-""" 3.5.2. visualize: base prediction """
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'rb') as file:
-    ensemble_mean_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'rb') as file:
+        ensemble_sample_val = pk.load(file)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'rb') as file:
-    ensemble_sample_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'rb') as file:
+        cond_weights_dict_val = pk.load(file)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'rb') as file:
-    cond_weights_dict_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'rb') as file:
+        ensemble_weights_val = pk.load(file)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'rb') as file:
-    ensemble_weights_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'rb') as file:
+        ensemble_weight_corr = pk.load(file)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'rb') as file:
-    ensemble_weight_corr = pk.load(file)
+    base_pred_dict = {key: value for key, value in base_valid_pred.items()
+                      if key in ensemble_model_names}
 
-base_pred_dict = {key: value for key, value in base_valid_pred.items()
-                  if key in ensemble_model_names}
+    visual_util.plot_base_prediction(base_pred=base_pred_dict,
+                                     X_valid=X_valid, y_valid=y_valid,
+                                     X_train=None, y_train=y_train,
+                                     save_addr=os.path.join(
+                                         _SAVE_ADDR_PREFIX,
+                                         "{}/ensemble_base_model_fit.png".format(family_name)))
 
-visual_util.plot_base_prediction(base_pred=base_pred_dict,
-                                 X_valid=X_valid, y_valid=y_valid,
-                                 X_train=X_train, y_train=y_train,
-                                 save_addr=os.path.join(
-                                     _SAVE_ADDR_PREFIX,
-                                     "{}/ensemble_base_model_fit.png".format(family_name)))
+    """ 3.5.3. visualize: ensemble posterior predictive mean """
 
-""" 3.5.3. visualize: ensemble posterior predictive mean """
+    posterior_mean_mu = np.nanmean(ensemble_mean_val, axis=0)
+    posterior_mean_cov = np.nanvar(ensemble_mean_val, axis=0)
 
-posterior_mean_mu = np.nanmean(ensemble_mean_val, axis=0)
-posterior_mean_cov = np.nanvar(ensemble_mean_val, axis=0)
+    posterior_mean_median = np.nanmedian(ensemble_mean_val, axis=0)
+    posterior_mean_quantiles = [
+        np.percentile(ensemble_mean_val,
+                      [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
+        for q in [68, 95, 99]
+    ]
 
-posterior_mean_median = np.nanmedian(ensemble_mean_val, axis=0)
-posterior_mean_quantiles = [
-    np.percentile(ensemble_mean_val,
-                  [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
-    for q in [68, 95, 99]
-]
+    visual_util.gpr_1d_visual(posterior_mean_mu,
+                              pred_cov=posterior_mean_cov,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Mean, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_mean.png".format(family_name))
+                              )
 
-visual_util.gpr_1d_visual(posterior_mean_mu,
-                          pred_cov=posterior_mean_cov,
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Mean, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_mean.png".format(family_name))
-                          )
+    visual_util.gpr_1d_visual(posterior_mean_median,
+                              pred_cov=None,
+                              pred_quantiles=posterior_mean_quantiles,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Mean Quantiles, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_mean_quantile.png".format(family_name))
+                              )
 
-visual_util.gpr_1d_visual(posterior_mean_median,
-                          pred_cov=None,
-                          pred_quantiles=posterior_mean_quantiles,
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Mean Quantiles, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_mean_quantile.png".format(family_name))
-                          )
+    visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                              pred_samples=list(ensemble_mean_val)[:2500],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Samples, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_sample.png".format(family_name))
+                              )
 
-visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
-                          pred_samples=list(ensemble_mean_val)[:2500],
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Samples, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_sample.png".format(family_name))
-                          )
+    """ 3.5.4. visualize: ensemble residual """
 
-""" 3.5.4. visualize: ensemble residual """
+    posterior_resid_mu = np.nanmean(ensemble_resid_valid_sample, axis=0)
+    posterior_resid_cov = np.nanvar(ensemble_resid_valid_sample, axis=0)
 
-posterior_resid_mu = np.nanmean(ensemble_resid_valid_sample, axis=0)
-posterior_resid_cov = np.nanvar(ensemble_resid_valid_sample, axis=0)
+    posterior_resid_median = np.nanmedian(ensemble_resid_valid_sample, axis=0)
+    posterior_resid_quantiles = [
+        np.percentile(ensemble_resid_valid_sample,
+                      [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
+        for q in [68, 95, 99]
+    ]
 
-posterior_resid_median = np.nanmedian(ensemble_resid_valid_sample, axis=0)
-posterior_resid_quantiles = [
-    np.percentile(ensemble_resid_valid_sample,
-                  [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
-    for q in [68, 95, 99]
-]
+    visual_util.gpr_1d_visual(posterior_resid_mu,
+                              pred_cov=posterior_resid_cov,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Residual, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_resid.png".format(family_name))
+                              )
 
-visual_util.gpr_1d_visual(posterior_resid_mu,
-                          pred_cov=posterior_resid_cov,
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_resid.png".format(family_name))
-                          )
+    visual_util.gpr_1d_visual(posterior_resid_median,
+                              pred_cov=None,
+                              pred_quantiles=posterior_resid_quantiles,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Residual Quantiles, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_resid_quantile.png".format(family_name))
+                              )
 
-visual_util.gpr_1d_visual(posterior_resid_median,
-                          pred_cov=None,
-                          pred_quantiles=posterior_resid_quantiles,
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual Quantiles, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_resid_quantile.png".format(family_name))
-                          )
+    visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                              pred_samples=list(ensemble_resid_valid_sample)[:2500],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Residual Samples, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_resid_sample.png".format(family_name))
+                              )
 
-visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
-                          pred_samples=list(ensemble_resid_valid_sample)[:2500],
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual Samples, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_resid_sample.png".format(family_name))
-                          )
+    """ 3.5.5. visualize: ensemble posterior full """
 
-""" 3.5.5. visualize: ensemble posterior full """
+    posterior_dist_mu = np.nanmean(ensemble_sample_val, axis=0)
+    posterior_dist_cov = np.nanvar(ensemble_sample_val, axis=0)
 
-posterior_dist_mu = np.nanmean(ensemble_sample_val, axis=0)
-posterior_dist_cov = np.nanvar(ensemble_sample_val, axis=0)
+    posterior_dist_median = np.nanmedian(ensemble_sample_val, axis=0)
+    posterior_dist_quantiles = [
+        np.percentile(ensemble_sample_val,
+                      [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
+        for q in [68, 95, 99]
+    ]
 
-posterior_dist_median = np.nanmedian(ensemble_sample_val, axis=0)
-posterior_dist_quantiles = [
-    np.percentile(ensemble_sample_val,
-                  [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
-    for q in [68, 95, 99]
-]
+    visual_util.gpr_1d_visual(posterior_dist_mu,
+                              pred_cov=posterior_dist_cov,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Predictive, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_full.png".format(family_name))
+                              )
 
-visual_util.gpr_1d_visual(posterior_dist_mu,
-                          pred_cov=posterior_dist_cov,
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Predictive, {}".format(family_name_full),
-                          save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "{}/ensemble_posterior_full.png".format(family_name))
-                          )
+    visual_util.gpr_1d_visual(posterior_dist_median,
+                              pred_cov=None,
+                              pred_quantiles=posterior_dist_quantiles,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_full_quantile.png".format(family_name))
+                              )
+    visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                              pred_samples=list(ensemble_sample_val)[:2500],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_full_sample.png".format(family_name))
+                              )
 
-visual_util.gpr_1d_visual(posterior_dist_median,
-                          pred_cov=None,
-                          pred_quantiles=posterior_dist_quantiles,
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
-                          save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "{}/ensemble_posterior_full_quantile.png".format(family_name))
-                          )
-visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
-                          pred_samples=list(ensemble_sample_val)[:2500],
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
-                          save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "{}/ensemble_posterior_full_sample.png".format(family_name))
-                          )
+    visual_util.gpr_1d_visual(pred_mean=posterior_dist_median,
+                              pred_cov=None,
+                              pred_quantiles=[
+                                  [posterior_dist_median - 3 * np.sqrt(posterior_mean_cov),
+                                   posterior_dist_median + 3 * np.sqrt(posterior_mean_cov)],
+                                  [posterior_dist_median - 3 * np.sqrt(posterior_dist_cov),
+                                   posterior_dist_median + 3 * np.sqrt(posterior_dist_cov)],
+                              ],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              quantile_colors=["red", "black"],
+                              quantile_alpha=0.2,
+                              title="Ensemble Posterior, Uncertainty Decomposition, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_unc_decomp.png".format(family_name))
+                              )
 
-""" 3.5.6. visualize: ensemble posterior reliability """
+    """ 3.5.6. visualize: ensemble posterior reliability """
+    y_calib = y_valid[calib_sample_id]
+    y_sample_calib = ensemble_sample_val[:, calib_sample_id].T
 
-visual_util.prob_calibration_1d(
-    y_valid, ensemble_sample_val.T,
-    title="Ensemble, {}".format(family_name_full),
-    save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                           "{}/ensemble_calibration_prob.png".format(family_name)))
+    visual_util.prob_calibration_1d(
+        y_calib, y_sample_calib,
+        title="Ensemble, {}".format(family_name_full),
+        save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                               "{}/ensemble_calibration_prob.png".format(family_name)))
 
-visual_util.marginal_calibration_1d(
-    y_valid, ensemble_sample_val.T,
-    title="Ensemble, {}".format(family_name_full),
-    save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                           "{}/ensemble_calibration_marginal.png".format(family_name)))
+    """ 3.5.7. visualize: base ensemble weight with uncertainty """
+    visual_util.plot_ensemble_weight_mean_1d(X=X_valid, weight_sample=ensemble_weights_val,
+                                             model_names=ensemble_model_names,
+                                             save_addr_prefix=os.path.join(
+                                                 _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
 
-""" 3.5.7. visualize: base ensemble weight with uncertainty """
-visual_util.plot_ensemble_weight_mean_1d(X=X_valid, weight_sample=ensemble_weights_val,
-                                         model_names=ensemble_model_names,
-                                         save_addr_prefix=os.path.join(
-                                             _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
+    visual_util.plot_ensemble_weight_median_1d(X=X_valid, weight_sample=ensemble_weights_val,
+                                               model_names=ensemble_model_names,
+                                               save_addr_prefix=os.path.join(
+                                                   _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
 
-visual_util.plot_ensemble_weight_median_1d(X=X_valid, weight_sample=ensemble_weights_val,
-                                           model_names=ensemble_model_names,
-                                           save_addr_prefix=os.path.join(
-                                               _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
-
-# model family weights
-ensemble_weights_family = np.stack(
-    [cond_weights_dict_val[key] for key in family_tree_dict['root']], axis=-1)
-visual_util.plot_ensemble_weight_mean_1d(X=X_valid,
-                                         weight_sample=ensemble_weights_family,
-                                         model_names=family_tree_dict['root'],
-                                         save_addr_prefix=os.path.join(
-                                             _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
-visual_util.plot_ensemble_weight_median_1d(X=X_valid,
-                                           weight_sample=ensemble_weights_family,
-                                           model_names=family_tree_dict['root'],
-                                           save_addr_prefix=os.path.join(
-                                               _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
+    # model family weights
+    ensemble_weights_family = np.stack(
+        [cond_weights_dict_val[key] for key in family_tree_dict['root']], axis=-1)
+    visual_util.plot_ensemble_weight_mean_1d(X=X_valid,
+                                             weight_sample=ensemble_weights_family,
+                                             model_names=family_tree_dict['root'],
+                                             save_addr_prefix=os.path.join(
+                                                 _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
+    visual_util.plot_ensemble_weight_median_1d(X=X_valid,
+                                               weight_sample=ensemble_weights_family,
+                                               model_names=family_tree_dict['root'],
+                                               save_addr_prefix=os.path.join(
+                                                   _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
 
 """""""""""""""""""""""""""""""""
-# 4. Augmented Variational Inference
+# 4. Augmented VI I: Reliability Index
 """""""""""""""""""""""""""""""""
 with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_test_pred.pkl'), 'rb') as file:
     base_test_pred = pk.load(file)
@@ -989,348 +1012,983 @@ family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 
 n_inference_sample = 1000  # number of samples to collect from variational family for approx inference
 n_final_sample = 10000  # number of samples to collect from variational family for final summary
-max_steps = 10000  # number of training iterations
+max_steps = 20000  # number of training iterations
 
-family_name = "mfvi_aug"
+for family_name in ["mfvi_aug", "sgpr_aug"]:
+    if "mfvi" in family_name:
+        family_name_full = "Mean-field VI"
+        ensemble_variational_family = adaptive_ensemble.variational_mfvi
+        ensemble_variational_family_sample = adaptive_ensemble.variational_mfvi_sample
+    elif "sgpr" in family_name:
+        family_name_full = "Sparse Gaussian Process"
+        ensemble_variational_family = adaptive_ensemble.variational_sgpr
+        ensemble_variational_family_sample = adaptive_ensemble.variational_sgpr_sample
 
-if "mfvi" in family_name:
-    family_name_full = "Mean-field VI"
-    ensemble_variational_family = adaptive_ensemble.variational_mfvi
-    ensemble_variational_family_sample = adaptive_ensemble.variational_mfvi_sample
-elif "sgpr" in family_name:
-    family_name_full = "Sparse Gaussian Process"
-    ensemble_variational_family = adaptive_ensemble.variational_sgpr
-    ensemble_variational_family_sample = adaptive_ensemble.variational_sgpr_sample
+    """ 4.2. Set up the computational graph """
+    vi_graph = tf.Graph()
 
-""" 4.2. Set up the computational graph """
-vi_graph = tf.Graph()
+    with vi_graph.as_default():
+        # sample from variational family
+        (weight_gp_dict, resid_gp, temp_dict, sigma, _, _,  # variational RVs
+         weight_gp_mean_dict, weight_gp_vcov_dict,  # variational parameters, weight GP
+         resid_gp_mean, resid_gp_vcov,  # resid GP variational parameters
+         temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
+         sigma_mean, sigma_sdev  # variational parameters, resid GP
+         ) = ensemble_variational_family(X=X_test,
+                                         Z=X_induce,
+                                         base_pred=base_test_pred,
+                                         family_tree=family_tree_dict,
+                                         log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
+                                         log_ls_resid=DEFAULT_LOG_LS_RESID,
+                                         kernel_func=gp.rbf,
+                                         ridge_factor=1e-3)
 
-with vi_graph.as_default():
-    # sample from variational family
-    (weight_gp_dict, resid_gp, temp_dict, sigma,  # variational RVs
-     weight_gp_mean_dict, weight_gp_vcov_dict,  # variational parameters, weight GP
-     resid_gp_mean, resid_gp_vcov,  # resid GP variational parameters
-     temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
-     sigma_mean, sigma_sdev  # variational parameters, resid GP
-     ) = ensemble_variational_family(X=X_test,
-                                     Z=X_induce,
-                                     base_pred=base_test_pred,
-                                     family_tree=family_tree_dict,
-                                     ls_weight=DEFAULT_LS_WEIGHT,
-                                     ls_resid=DEFAULT_LS_RESID,
-                                     kernel_func=gp.rbf,
-                                     ridge_factor=1e-3)
+        # assemble kwargs for make_value_setter
+        variational_rv_dict = {"ensemble_resid": resid_gp, "sigma": sigma, }
+        variational_rv_dict.update(temp_dict)
+        variational_rv_dict.update(weight_gp_dict)
 
-    # assemble kwargs for make_value_setter
-    variational_rv_dict = {"ensemble_resid": resid_gp, "sigma": sigma, }
-    variational_rv_dict.update(temp_dict)
-    variational_rv_dict.update(weight_gp_dict)
+        # compute the expected predictive log-likelihood
+        with ed.tape() as model_tape:
+            with ed.interception(make_value_setter(**variational_rv_dict)):
+                y = adaptive_ensemble.model_tailfree(X=X_test, base_pred=base_test_pred, family_tree=family_tree_dict,
+                                                     log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
+                                                     log_ls_resid=DEFAULT_LOG_LS_RESID, kernel_func=gp.rbf,
+                                                     ridge_factor=1e-3)
 
-    # compute the expected predictive log-likelihood
-    with ed.tape() as model_tape:
-        with ed.interception(make_value_setter(**variational_rv_dict)):
-            y = adaptive_ensemble.model_tailfree(
-                X=X_test,
-                base_pred=base_test_pred,
-                family_tree=family_tree_dict,
-                ls_weight=DEFAULT_LS_WEIGHT,
-                ls_resid=DEFAULT_LS_RESID,
-                kernel_func=gp.rbf,
-                ridge_factor=1e-3)
+        log_likelihood = y.distribution.log_prob(y_test)
 
-    log_likelihood = y.distribution.log_prob(y_test)
+        # compute the KL divergence
+        kl = 0.
+        for rv_name, variational_rv in variational_rv_dict.items():
+            kl += tf.reduce_sum(
+                variational_rv.distribution.kl_divergence(
+                    model_tape[rv_name].distribution)
+            )
 
-    # compute the KL divergence
-    kl = 0.
-    for rv_name, variational_rv in variational_rv_dict.items():
-        kl += tf.reduce_sum(
-            variational_rv.distribution.kl_divergence(
-                model_tape[rv_name].distribution)
+        # compute the calibration score
+        y_approx_sample = y.distribution.sample(n_inference_sample)
+        calibration_loss = score.make_calibration_loss(
+            Y_obs=np.expand_dims(y_test, -1),
+            Y_sample=y_approx_sample,
+            log_prob=y.distribution.log_prob
         )
 
-    # compute the calibration score
-    y_approx_sample = y.distribution.sample(n_inference_sample)
-    calibration_loss = score.make_calibration_loss(
-        Y_obs=np.expand_dims(y_test, -1),
-        Y_sample=y_approx_sample,
-        log_prob=y.distribution.log_prob
+        # define loss objective to maximize: ELBO = E_q(-log p(x|z)) - KL(q || p)
+        elbo = tf.reduce_mean(log_likelihood - kl)
+        loss_op = -elbo + 25 * calibration_loss  # -elbo
+
+        # define optimizer
+        optimizer = tf.train.AdamOptimizer(5e-3)
+        train_op = optimizer.minimize(loss_op)
+
+        # define init op
+        init_op = tf.global_variables_initializer()
+
+        vi_graph.finalize()
+
+    """ 4.3. execute optimization, then sample from variational family """
+    # optimize
+    with tf.Session(graph=vi_graph) as sess:
+        start_time = time.time()
+
+        sess.run(init_op)
+        for step in range(max_steps):
+            start_time = time.time()
+            _, elbo_value, calibration_val = sess.run([
+                train_op, elbo, calibration_loss])
+            if step % 500 == 0:
+                duration = time.time() - start_time
+                print("Step: {:>3d} ELBO: {:.3f}, Calibration: {:.3f}, ({:.3f} sec)".format(
+                    step, elbo_value, calibration_val, duration))
+
+        (weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
+         resid_gp_mean_val, resid_gp_vcov_val,
+         temp_mean_dict_val, temp_sdev_dict_val,
+         sigma_mean_val, sigma_sdev_val) = sess.run([
+            weight_gp_mean_dict, weight_gp_vcov_dict,
+            resid_gp_mean, resid_gp_vcov,
+            temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
+            sigma_mean, sigma_sdev])
+
+        sess.close()
+
+    # sample
+    with tf.Session() as sess:
+        (weight_gp_sample_dict, temp_sample_dict,
+         resid_gp_sample, sigma_sample, _, _) = (
+            ensemble_variational_family_sample(
+                n_final_sample,
+                weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
+                temp_mean_dict_val, temp_sdev_dict_val,
+                resid_gp_mean_val, resid_gp_vcov_val,
+                sigma_mean_val, sigma_sdev_val,
+                log_ls_weight_mean=DEFAULT_LOG_LS_WEIGHT,
+                log_ls_weight_sdev=.01,
+                log_ls_resid_mean=DEFAULT_LOG_LS_WEIGHT,
+                log_ls_resid_sdev=.01
+            ))
+
+        (weight_gp_sample_dict_val, temp_sample_dict_val,
+         resid_gp_sample_val, sigma_sample_val) = sess.run([
+            weight_gp_sample_dict, temp_sample_dict,
+            resid_gp_sample, sigma_sample])
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/sigma_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(sigma_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/temp_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(temp_sample_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/weight_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(weight_gp_sample_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_resid_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(resid_gp_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+
+    """ 4.4. prediction and posterior sampling """
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/sigma_sample.pkl'.format(family_name)), 'rb') as file:
+        sigma_sample_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/temp_sample.pkl'.format(family_name)), 'rb') as file:
+        temp_sample_dict_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/weight_sample.pkl'.format(family_name)), 'rb') as file:
+        weight_gp_sample_dict_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_resid_sample.pkl'.format(family_name)), 'rb') as file:
+        resid_gp_sample_val = pk.load(file)
+
+    # compute GP prediction for weight GP and residual GP
+    raw_weights_dict = dict()
+
+    for model_name, model_weight_sample in weight_gp_sample_dict_val.items():
+        # extract node name and verify correctness
+        node_name = model_name.replace("{}_".format(tail_free.BASE_WEIGHT_NAME_PREFIX), "")
+        assert node_name in tail_free.get_nonroot_node_names(family_tree_dict)
+
+        raw_weights_dict[node_name] = (
+            gp.sample_posterior_full(X_new=X_valid, X=X_test,
+                                     f_sample=model_weight_sample.T,
+                                     ls=np.exp(DEFAULT_LOG_LS_WEIGHT),
+                                     kernel_func=gp.rbf).T.astype(np.float32))
+
+    ensemble_resid_valid_sample = (
+        gp.sample_posterior_full(X_new=X_valid, X=X_test,
+                                 f_sample=resid_gp_sample_val.T,
+                                 ls=np.exp(DEFAULT_LOG_LS_RESID),
+                                 kernel_func=gp.rbf).T
     )
 
-    # define loss objective to maximize: ELBO = E_q(-log p(x|z)) - KL(q || p)
-    elbo = tf.reduce_mean(log_likelihood - kl)
-    loss_op = -elbo #+ 50 * calibration_loss #-elbo
+    # prepare temperature dictionary
+    parent_temp_dict = dict()
+    for model_name, parent_temp_sample in temp_sample_dict_val.items():
+        # extract node name and verify correctness
+        node_name = model_name.replace("{}_".format(tail_free.TEMP_NAME_PREFIX), "")
+        assert node_name in tail_free.get_parent_node_names(family_tree_dict)
 
-    # define optimizer
-    optimizer = tf.train.AdamOptimizer(5e-3)
-    train_op = optimizer.minimize(loss_op)
+        parent_temp_dict[node_name] = parent_temp_sample
 
-    # define init op
-    init_op = tf.global_variables_initializer()
+    # compute sample for posterior mean
+    (ensemble_sample_val, ensemble_mean_val,
+     ensemble_weights_val, cond_weights_dict_val, ensemble_model_names) = (
+        adaptive_ensemble.sample_posterior_tailfree(X=X_valid, base_pred_dict=base_valid_pred,
+                                                    family_tree=family_tree_dict, weight_gp_dict=raw_weights_dict,
+                                                    temp_dict=parent_temp_dict,
+                                                    resid_gp_sample=ensemble_resid_valid_sample,
+                                                    log_ls_weight=DEFAULT_LOG_LS_WEIGHT))
 
-    vi_graph.finalize()
+    # compute covariance matrix among model weights
+    model_weights_raw = np.asarray([raw_weights_dict[model_name]
+                                    for model_name in ensemble_model_names])
+    model_weights_raw = np.swapaxes(model_weights_raw, 0, -1)
+    ensemble_weight_corr = matrix_util.corr_mat(model_weights_raw, axis=0)
 
-""" 4.3. execute optimization, then sample from variational family """
-# optimize
-with tf.Session(graph=vi_graph) as sess:
-    start_time = time.time()
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_mean_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
-    sess.run(init_op)
-    for step in range(max_steps):
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(cond_weights_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_weights_val, file, protocol=pk.HIGHEST_PROTOCOL)
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_weight_corr, file, protocol=pk.HIGHEST_PROTOCOL)
+
+    """ 4.4.2. visualize: base prediction """
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'rb') as file:
+        ensemble_mean_val = pk.load(file)
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'rb') as file:
+        ensemble_sample_val = pk.load(file)
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'rb') as file:
+        cond_weights_dict_val = pk.load(file)
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'rb') as file:
+        ensemble_weights_val = pk.load(file)
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'rb') as file:
+        ensemble_weight_corr = pk.load(file)
+
+    base_pred_dict = {key: value for key, value in base_valid_pred.items()
+                      if key in ensemble_model_names}
+
+    visual_util.plot_base_prediction(base_pred=base_pred_dict,
+                                     X_valid=X_valid, y_valid=y_valid,
+                                     X_train=X_train, y_train=y_train,
+                                     save_addr=os.path.join(
+                                         _SAVE_ADDR_PREFIX,
+                                         "{}/ensemble_base_model_fit.png".format(family_name)))
+
+    """ 4.4.3. visualize: ensemble posterior predictive mean """
+
+    posterior_mean_mu = np.nanmean(ensemble_mean_val, axis=0)
+    posterior_mean_cov = np.nanvar(ensemble_mean_val, axis=0)
+
+    posterior_mean_median = np.nanmedian(ensemble_mean_val, axis=0)
+    posterior_mean_quantiles = [
+        np.percentile(ensemble_mean_val,
+                      [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
+        for q in [68, 95, 99]
+    ]
+
+    visual_util.gpr_1d_visual(posterior_mean_mu,
+                              pred_cov=posterior_mean_cov,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Mean, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_mean.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(posterior_mean_median,
+                              pred_cov=None,
+                              pred_quantiles=posterior_mean_quantiles,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Mean Quantiles, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_mean_quantile.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                              pred_samples=list(ensemble_mean_val)[:2500],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Samples, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_sample.png".format(family_name))
+                              )
+
+    """ 4.4.4. visualize: ensemble residual """
+
+    posterior_resid_mu = np.nanmean(ensemble_resid_valid_sample, axis=0)
+    posterior_resid_cov = np.nanvar(ensemble_resid_valid_sample, axis=0)
+
+    posterior_resid_median = np.nanmedian(ensemble_resid_valid_sample, axis=0)
+    posterior_resid_quantiles = [
+        np.percentile(ensemble_resid_valid_sample,
+                      [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
+        for q in [68, 95, 99]
+    ]
+
+    visual_util.gpr_1d_visual(posterior_resid_mu,
+                              pred_cov=posterior_resid_cov,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Residual, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_resid.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(posterior_resid_median,
+                              pred_cov=None,
+                              pred_quantiles=posterior_resid_quantiles,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Residual Quantiles, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_resid_quantile.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                              pred_samples=list(ensemble_resid_valid_sample)[:2500],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Residual Samples, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_resid_sample.png".format(family_name))
+                              )
+
+    """ 4.4.5. visualize: ensemble posterior full """
+
+    posterior_dist_mu = np.nanmean(ensemble_sample_val, axis=0)
+    posterior_dist_cov = np.nanvar(ensemble_sample_val, axis=0)
+
+    posterior_dist_median = np.nanmedian(ensemble_sample_val, axis=0)
+    posterior_dist_quantiles = [
+        np.percentile(ensemble_sample_val,
+                      [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
+        for q in [68, 95, 99]
+    ]
+
+    visual_util.gpr_1d_visual(posterior_dist_mu,
+                              pred_cov=posterior_dist_cov,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Predictive, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_full.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(posterior_dist_median,
+                              pred_cov=None,
+                              pred_quantiles=posterior_dist_quantiles,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_full_quantile.png".format(family_name))
+                              )
+    visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                              pred_samples=list(ensemble_sample_val)[:2500],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_full_sample.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(pred_mean=posterior_dist_median,
+                              pred_cov=None,
+                              pred_quantiles=[
+                                  [posterior_dist_median - 3 * np.sqrt(posterior_mean_cov),
+                                   posterior_dist_median + 3 * np.sqrt(posterior_mean_cov)],
+                                  [posterior_dist_median - 3 * np.sqrt(posterior_dist_cov),
+                                   posterior_dist_median + 3 * np.sqrt(posterior_dist_cov)],
+                              ],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              quantile_colors=["red", "black"],
+                              quantile_alpha=0.2,
+                              title="Ensemble Posterior, Uncertainty Decomposition, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_unc_decomp.png".format(family_name))
+                              )
+
+    """ 4.4.6. visualize: ensemble posterior reliability """
+    y_calib = y_valid[calib_sample_id]
+    y_sample_calib = ensemble_sample_val[:, calib_sample_id].T
+
+    visual_util.prob_calibration_1d(
+        y_calib, y_sample_calib,
+        title="Ensemble, {}".format(family_name_full),
+        save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                               "{}/ensemble_calibration_prob.png".format(family_name)))
+
+    """ 4.4.7. visualize: base ensemble weight with uncertainty """
+    visual_util.plot_ensemble_weight_mean_1d(X=X_valid, weight_sample=ensemble_weights_val,
+                                             model_names=ensemble_model_names,
+                                             save_addr_prefix=os.path.join(
+                                                 _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
+
+    visual_util.plot_ensemble_weight_median_1d(X=X_valid, weight_sample=ensemble_weights_val,
+                                               model_names=ensemble_model_names,
+                                               save_addr_prefix=os.path.join(
+                                                   _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
+
+    # model family weights
+    ensemble_weights_family = np.stack(
+        [cond_weights_dict_val[key] for key in family_tree_dict['root']], axis=-1)
+    visual_util.plot_ensemble_weight_mean_1d(X=X_valid,
+                                             weight_sample=ensemble_weights_family,
+                                             model_names=family_tree_dict['root'],
+                                             save_addr_prefix=os.path.join(
+                                                 _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
+    visual_util.plot_ensemble_weight_median_1d(X=X_valid,
+                                               weight_sample=ensemble_weights_family,
+                                               model_names=family_tree_dict['root'],
+                                               save_addr_prefix=os.path.join(
+                                                   _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
+
+"""""""""""""""""""""""""""""""""
+# 5. Augmented VI II: CRPS
+"""""""""""""""""""""""""""""""""
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_test_pred.pkl'), 'rb') as file:
+    base_test_pred = pk.load(file)
+
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_valid_pred.pkl'), 'rb') as file:
+    base_valid_pred = pk.load(file)
+
+""" 5.1. basic data/algorithm config"""
+
+X_induce = np.expand_dims(np.linspace(np.min(X_test),
+                                      np.max(X_test), 10), 1).astype(np.float32)
+family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
+
+n_inference_sample = 500  # number of samples to collect from variational family for approx inference
+n_final_sample = 10000  # number of samples to collect from variational family for final summary
+max_steps = 20000  # number of training iterations
+
+for family_name in ["mfvi_crps", "sgpr_crps"]:
+    if "mfvi" in family_name:
+        family_name_full = "Mean-field VI"
+        ensemble_variational_family = adaptive_ensemble.variational_mfvi
+        ensemble_variational_family_sample = adaptive_ensemble.variational_mfvi_sample
+    elif "sgpr" in family_name:
+        family_name_full = "Sparse Gaussian Process"
+        ensemble_variational_family = adaptive_ensemble.variational_sgpr
+        ensemble_variational_family_sample = adaptive_ensemble.variational_sgpr_sample
+
+    """ 5.2. Set up the computational graph """
+    vi_graph = tf.Graph()
+
+    with vi_graph.as_default():
+        # sample from variational family
+        (weight_gp_dict, resid_gp, temp_dict, sigma, _, _,  # variational RVs
+         weight_gp_mean_dict, weight_gp_vcov_dict,  # variational parameters, weight GP
+         resid_gp_mean, resid_gp_vcov,  # resid GP variational parameters
+         temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
+         sigma_mean, sigma_sdev  # variational parameters, resid GP
+         ) = ensemble_variational_family(X=X_test,
+                                         Z=X_induce,
+                                         base_pred=base_test_pred,
+                                         family_tree=family_tree_dict,
+                                         log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
+                                         log_ls_resid=DEFAULT_LOG_LS_RESID,
+                                         kernel_func=gp.rbf,
+                                         ridge_factor=1e-3)
+
+        # assemble kwargs for make_value_setter
+        variational_rv_dict = {"ensemble_resid": resid_gp, "sigma": sigma, }
+        variational_rv_dict.update(temp_dict)
+        variational_rv_dict.update(weight_gp_dict)
+
+        # compute the expected predictive log-likelihood
+        with ed.tape() as model_tape:
+            with ed.interception(make_value_setter(**variational_rv_dict)):
+                y = adaptive_ensemble.model_tailfree(X=X_test, base_pred=base_test_pred, family_tree=family_tree_dict,
+                                                     log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
+                                                     log_ls_resid=DEFAULT_LOG_LS_RESID, kernel_func=gp.rbf,
+                                                     ridge_factor=1e-3)
+
+        log_likelihood = y.distribution.log_prob(y_test)
+
+        # compute the KL divergence
+        kl = 0.
+        for rv_name, variational_rv in variational_rv_dict.items():
+            kl += tf.reduce_sum(
+                variational_rv.distribution.kl_divergence(
+                    model_tape[rv_name].distribution)
+            )
+
+        # compute the calibration score
+        y_sample_1 = y.distribution.sample(n_inference_sample)
+        y_sample_2 = y.distribution.sample(n_inference_sample)
+
+        crps_loss = score.make_kernel_score_loss(
+            X_sample=y_sample_1,
+            Y_sample=y_sample_2,
+            Y_obs=np.expand_dims(y_test, -1),
+            log_prob=y.distribution.log_prob,
+            dist_func=tf.abs
+        )
+
+        # define loss objective to maximize: ELBO = E_q(-log p(x|z)) - KL(q || p)
+        elbo = tf.reduce_mean(log_likelihood - kl)
+        loss_op = -elbo + 25 * crps_loss  # -elbo
+
+        # define optimizer
+        optimizer = tf.train.AdamOptimizer(5e-3)
+        train_op = optimizer.minimize(loss_op)
+
+        # define init op
+        init_op = tf.global_variables_initializer()
+
+        vi_graph.finalize()
+
+    """ 5.3. execute optimization, then sample from variational family """
+    # optimize
+    with tf.Session(graph=vi_graph) as sess:
         start_time = time.time()
-        _, elbo_value, calibration_val = sess.run([
-            train_op, elbo, calibration_loss])
-        if step % 500 == 0:
-            duration = time.time() - start_time
-            print("Step: {:>3d} ELBO: {:.3f}, Calibration: {:.3f}, ({:.3f} sec)".format(
-                step, elbo_value, calibration_val, duration))
 
-    (weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
-     resid_gp_mean_val, resid_gp_vcov_val,
-     temp_mean_dict_val, temp_sdev_dict_val,
-     sigma_mean_val, sigma_sdev_val) = sess.run([
-        weight_gp_mean_dict, weight_gp_vcov_dict,
-        resid_gp_mean, resid_gp_vcov,
-        temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
-        sigma_mean, sigma_sdev])
+        sess.run(init_op)
+        for step in range(max_steps):
+            start_time = time.time()
+            _, elbo_value, crps_val = sess.run([
+                train_op, elbo, crps_loss])
+            if step % 500 == 0:
+                duration = time.time() - start_time
+                print("Step: {:>3d} ELBO: {:.3f}, Calibration: {:.3f}, ({:.3f} sec)".format(
+                    step, elbo_value, crps_val, duration))
 
-    sess.close()
+        (weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
+         resid_gp_mean_val, resid_gp_vcov_val,
+         temp_mean_dict_val, temp_sdev_dict_val,
+         sigma_mean_val, sigma_sdev_val) = sess.run([
+            weight_gp_mean_dict, weight_gp_vcov_dict,
+            resid_gp_mean, resid_gp_vcov,
+            temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
+            sigma_mean, sigma_sdev])
 
-# sample
-with tf.Session() as sess:
-    (weight_gp_sample_dict, temp_sample_dict,
-     resid_gp_sample, sigma_sample) = (
-        ensemble_variational_family_sample(
-            n_final_sample,
-            weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
-            temp_mean_dict_val, temp_sdev_dict_val,
-            resid_gp_mean_val, resid_gp_vcov_val,
-            sigma_mean_val, sigma_sdev_val))
+        sess.close()
 
-    (weight_gp_sample_dict_val, temp_sample_dict_val,
-     resid_gp_sample_val, sigma_sample_val) = sess.run([
-        weight_gp_sample_dict, temp_sample_dict,
-        resid_gp_sample, sigma_sample])
+    # sample
+    with tf.Session() as sess:
+        (weight_gp_sample_dict, temp_sample_dict,
+         resid_gp_sample, sigma_sample, _, _) = (
+            ensemble_variational_family_sample(
+                n_final_sample,
+                weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
+                temp_mean_dict_val, temp_sdev_dict_val,
+                resid_gp_mean_val, resid_gp_vcov_val,
+                sigma_mean_val, sigma_sdev_val,
+                log_ls_weight_mean=DEFAULT_LOG_LS_WEIGHT,
+                log_ls_weight_sdev=.01,
+                log_ls_resid_mean=DEFAULT_LOG_LS_WEIGHT,
+                log_ls_resid_sdev=.01
+            ))
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/sigma_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(sigma_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/temp_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(temp_sample_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/weight_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(weight_gp_sample_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_resid_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(resid_gp_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+        (weight_gp_sample_dict_val, temp_sample_dict_val,
+         resid_gp_sample_val, sigma_sample_val) = sess.run([
+            weight_gp_sample_dict, temp_sample_dict,
+            resid_gp_sample, sigma_sample])
 
-""" 4.4. prediction and posterior sampling """
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/sigma_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(sigma_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/temp_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(temp_sample_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/weight_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(weight_gp_sample_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_resid_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(resid_gp_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/sigma_sample.pkl'.format(family_name)), 'rb') as file:
-    sigma_sample_val = pk.load(file)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/temp_sample.pkl'.format(family_name)), 'rb') as file:
-    temp_sample_dict_val = pk.load(file)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/weight_sample.pkl'.format(family_name)), 'rb') as file:
-    weight_gp_sample_dict_val = pk.load(file)
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_resid_sample.pkl'.format(family_name)), 'rb') as file:
-    resid_gp_sample_val = pk.load(file)
+    """ 5.4. prediction and posterior sampling """
 
-# compute GP prediction for weight GP and residual GP
-raw_weights_dict = dict()
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/sigma_sample.pkl'.format(family_name)), 'rb') as file:
+        sigma_sample_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/temp_sample.pkl'.format(family_name)), 'rb') as file:
+        temp_sample_dict_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/weight_sample.pkl'.format(family_name)), 'rb') as file:
+        weight_gp_sample_dict_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_resid_sample.pkl'.format(family_name)), 'rb') as file:
+        resid_gp_sample_val = pk.load(file)
 
-for model_name, model_weight_sample in weight_gp_sample_dict_val.items():
-    # extract node name and verify correctness
-    node_name = model_name.replace("{}_".format(tail_free.BASE_WEIGHT_NAME_PREFIX), "")
-    assert node_name in tail_free.get_nonroot_node_names(family_tree_dict)
+    # compute GP prediction for weight GP and residual GP
+    raw_weights_dict = dict()
 
-    raw_weights_dict[node_name] = (
+    for model_name, model_weight_sample in weight_gp_sample_dict_val.items():
+        # extract node name and verify correctness
+        node_name = model_name.replace("{}_".format(tail_free.BASE_WEIGHT_NAME_PREFIX), "")
+        assert node_name in tail_free.get_nonroot_node_names(family_tree_dict)
+
+        raw_weights_dict[node_name] = (
+            gp.sample_posterior_full(X_new=X_valid, X=X_test,
+                                     f_sample=model_weight_sample.T,
+                                     ls=np.exp(DEFAULT_LOG_LS_WEIGHT),
+                                     kernel_func=gp.rbf).T.astype(np.float32))
+
+    ensemble_resid_valid_sample = (
         gp.sample_posterior_full(X_new=X_valid, X=X_test,
-                                 f_sample=model_weight_sample.T,
-                                 ls=DEFAULT_LS_WEIGHT,
-                                 kernel_func=gp.rbf).T.astype(np.float32))
+                                 f_sample=resid_gp_sample_val.T,
+                                 ls=np.exp(DEFAULT_LOG_LS_RESID),
+                                 kernel_func=gp.rbf).T
+    )
 
-ensemble_resid_valid_sample = (
-    gp.sample_posterior_full(X_new=X_valid, X=X_test,
-                             f_sample=resid_gp_sample_val.T,
-                             ls=DEFAULT_LS_RESID, kernel_func=gp.rbf).T
-)
+    # prepare temperature dictionary
+    parent_temp_dict = dict()
+    for model_name, parent_temp_sample in temp_sample_dict_val.items():
+        # extract node name and verify correctness
+        node_name = model_name.replace("{}_".format(tail_free.TEMP_NAME_PREFIX), "")
+        assert node_name in tail_free.get_parent_node_names(family_tree_dict)
 
-# prepare temperature dictionary
-parent_temp_dict = dict()
-for model_name, parent_temp_sample in temp_sample_dict_val.items():
-    # extract node name and verify correctness
-    node_name = model_name.replace("{}_".format(tail_free.TEMP_NAME_PREFIX), "")
-    assert node_name in tail_free.get_parent_node_names(family_tree_dict)
+        parent_temp_dict[node_name] = parent_temp_sample
 
-    parent_temp_dict[node_name] = parent_temp_sample
+    # compute sample for posterior mean
+    (ensemble_sample_val, ensemble_mean_val,
+     ensemble_weights_val, cond_weights_dict_val, ensemble_model_names) = (
+        adaptive_ensemble.sample_posterior_tailfree(X=X_valid, base_pred_dict=base_valid_pred,
+                                                    family_tree=family_tree_dict, weight_gp_dict=raw_weights_dict,
+                                                    temp_dict=parent_temp_dict,
+                                                    resid_gp_sample=ensemble_resid_valid_sample,
+                                                    log_ls_weight=DEFAULT_LOG_LS_WEIGHT))
 
-# compute sample for posterior mean
-(ensemble_sample_val, ensemble_mean_val,
- ensemble_weights_val, cond_weights_dict_val, ensemble_model_names) = (
-    adaptive_ensemble.sample_posterior_tailfree(
-        X=X_valid,
-        base_pred_dict=base_valid_pred,
-        family_tree=family_tree_dict,
-        weight_gp_dict=raw_weights_dict,
-        temp_dict=parent_temp_dict,
-        resid_gp_sample=ensemble_resid_valid_sample,
-        ls_weight=DEFAULT_LS_WEIGHT, ))
+    # compute covariance matrix among model weights
+    model_weights_raw = np.asarray([raw_weights_dict[model_name]
+                                    for model_name in ensemble_model_names])
+    model_weights_raw = np.swapaxes(model_weights_raw, 0, -1)
+    ensemble_weight_corr = matrix_util.corr_mat(model_weights_raw, axis=0)
 
-# compute covariance matrix among model weights
-model_weights_raw = np.asarray([raw_weights_dict[model_name]
-                                for model_name in ensemble_model_names])
-model_weights_raw = np.swapaxes(model_weights_raw, 0, -1)
-ensemble_weight_corr = matrix_util.corr_mat(model_weights_raw, axis=0)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_mean_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(ensemble_mean_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(ensemble_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(cond_weights_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(cond_weights_dict_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_weights_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(ensemble_weights_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ensemble_weight_corr, file, protocol=pk.HIGHEST_PROTOCOL)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'wb') as file:
-    pk.dump(ensemble_weight_corr, file, protocol=pk.HIGHEST_PROTOCOL)
+    """ 5.4.2. visualize: base prediction """
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'rb') as file:
+        ensemble_mean_val = pk.load(file)
 
-""" 4.4.2. visualize: base prediction """
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'rb') as file:
-    ensemble_mean_val = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'rb') as file:
+        ensemble_sample_val = pk.load(file)
 
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'rb') as file:
+        cond_weights_dict_val = pk.load(file)
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'rb') as file:
+        ensemble_weights_val = pk.load(file)
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'rb') as file:
+        ensemble_weight_corr = pk.load(file)
+
+    base_pred_dict = {key: value for key, value in base_valid_pred.items()
+                      if key in ensemble_model_names}
+
+    visual_util.plot_base_prediction(base_pred=base_pred_dict,
+                                     X_valid=X_valid, y_valid=y_valid,
+                                     X_train=X_train, y_train=y_train,
+                                     save_addr=os.path.join(
+                                         _SAVE_ADDR_PREFIX,
+                                         "{}/ensemble_base_model_fit.png".format(family_name)))
+
+    """ 5.4.3. visualize: ensemble posterior predictive mean """
+
+    posterior_mean_mu = np.nanmean(ensemble_mean_val, axis=0)
+    posterior_mean_cov = np.nanvar(ensemble_mean_val, axis=0)
+
+    posterior_mean_median = np.nanmedian(ensemble_mean_val, axis=0)
+    posterior_mean_quantiles = [
+        np.percentile(ensemble_mean_val,
+                      [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
+        for q in [68, 95, 99]
+    ]
+
+    visual_util.gpr_1d_visual(posterior_mean_mu,
+                              pred_cov=posterior_mean_cov,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Mean, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_mean.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(posterior_mean_median,
+                              pred_cov=None,
+                              pred_quantiles=posterior_mean_quantiles,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Mean Quantiles, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_mean_quantile.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                              pred_samples=list(ensemble_mean_val)[:2500],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Samples, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_sample.png".format(family_name))
+                              )
+
+    """ 5.4.4. visualize: ensemble residual """
+
+    posterior_resid_mu = np.nanmean(ensemble_resid_valid_sample, axis=0)
+    posterior_resid_cov = np.nanvar(ensemble_resid_valid_sample, axis=0)
+
+    posterior_resid_median = np.nanmedian(ensemble_resid_valid_sample, axis=0)
+    posterior_resid_quantiles = [
+        np.percentile(ensemble_resid_valid_sample,
+                      [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
+        for q in [68, 95, 99]
+    ]
+
+    visual_util.gpr_1d_visual(posterior_resid_mu,
+                              pred_cov=posterior_resid_cov,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Residual, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_resid.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(posterior_resid_median,
+                              pred_cov=None,
+                              pred_quantiles=posterior_resid_quantiles,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Residual Quantiles, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_resid_quantile.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                              pred_samples=list(ensemble_resid_valid_sample)[:2500],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Residual Samples, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "{}/ensemble_posterior_resid_sample.png".format(family_name))
+                              )
+
+    """ 5.4.5. visualize: ensemble posterior full """
+
+    posterior_dist_mu = np.nanmean(ensemble_sample_val, axis=0)
+    posterior_dist_cov = np.nanvar(ensemble_sample_val, axis=0)
+
+    posterior_dist_median = np.nanmedian(ensemble_sample_val, axis=0)
+    posterior_dist_quantiles = [
+        np.percentile(ensemble_sample_val,
+                      [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
+        for q in [68, 95, 99]
+    ]
+
+    visual_util.gpr_1d_visual(posterior_dist_mu,
+                              pred_cov=posterior_dist_cov,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Predictive, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_full.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(posterior_dist_median,
+                              pred_cov=None,
+                              pred_quantiles=posterior_dist_quantiles,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_full_quantile.png".format(family_name))
+                              )
+    visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                              pred_samples=list(ensemble_sample_val)[:2500],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_full_sample.png".format(family_name))
+                              )
+
+    visual_util.gpr_1d_visual(pred_mean=posterior_dist_median,
+                              pred_cov=None,
+                              pred_quantiles=[
+                                  [posterior_dist_median - 3 * np.sqrt(posterior_mean_cov),
+                                   posterior_dist_median + 3 * np.sqrt(posterior_mean_cov)],
+                                  [posterior_dist_median - 3 * np.sqrt(posterior_dist_cov),
+                                   posterior_dist_median + 3 * np.sqrt(posterior_dist_cov)],
+                              ],
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              quantile_colors=["red", "black"],
+                              quantile_alpha=0.2,
+                              title="Ensemble Posterior, Uncertainty Decomposition, {}".format(family_name_full),
+                              save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                     "{}/ensemble_posterior_unc_decomp.png".format(family_name))
+                              )
+
+    """ 5.4.6. visualize: ensemble posterior reliability """
+    y_calib = y_valid[calib_sample_id]
+    y_sample_calib = ensemble_sample_val[:, calib_sample_id].T
+
+    visual_util.prob_calibration_1d(
+        y_calib, y_sample_calib,
+        title="Ensemble, {}".format(family_name_full),
+        save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                               "{}/ensemble_calibration_prob.png".format(family_name)))
+
+    """ 5.4.7. visualize: base ensemble weight with uncertainty """
+    visual_util.plot_ensemble_weight_mean_1d(X=X_valid, weight_sample=ensemble_weights_val,
+                                             model_names=ensemble_model_names,
+                                             save_addr_prefix=os.path.join(
+                                                 _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
+
+    visual_util.plot_ensemble_weight_median_1d(X=X_valid, weight_sample=ensemble_weights_val,
+                                               model_names=ensemble_model_names,
+                                               save_addr_prefix=os.path.join(
+                                                   _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
+
+    # model family weights
+    ensemble_weights_family = np.stack(
+        [cond_weights_dict_val[key] for key in family_tree_dict['root']], axis=-1)
+    visual_util.plot_ensemble_weight_mean_1d(X=X_valid,
+                                             weight_sample=ensemble_weights_family,
+                                             model_names=family_tree_dict['root'],
+                                             save_addr_prefix=os.path.join(
+                                                 _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
+    visual_util.plot_ensemble_weight_median_1d(X=X_valid,
+                                               weight_sample=ensemble_weights_family,
+                                               model_names=family_tree_dict['root'],
+                                               save_addr_prefix=os.path.join(
+                                                   _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
+
+"""""""""""""""""""""""""""""""""
+# 6. Nonparametric Calibration
+"""""""""""""""""""""""""""""""""
+
+
+# helper function
+def sample_ecdf(n_sample, base_sample, quantile, seed=None):
+    """Sample observations form 1D empirical cdf using inverse CDF method.
+
+    Here empirical cdf is defined by base_sample and the
+        corresponding quantiles.
+
+    Args:
+        n_sample: (int) Number of samples.
+        base_sample: (np.ndarray of float32) Base samples to sample
+            from, shape (n_sample0, )
+        quantile: (np.ndarray of float32) Quantiles corresponding to
+            the base samples.
+
+    Returns:
+        (np.ndarray of float32) Sample of shape (n_sample,) corresponding
+            to the empirical cdf.
+    """
+    base_sample = np.sort(base_sample.squeeze())
+
+    # identify sample id using inverse CDF lookup
+    np.random.seed(seed)
+    sample_prob = np.random.sample(size=n_sample)
+    sample_id = np.sum(np.expand_dims(sample_prob, 0) >
+                       np.expand_dims(quantile, 1), axis=0) - 1
+    return base_sample[sample_id]
+
+
+""" 6.1. prepare hyperparameters"""
+
+# load hyper-parameters
+family_name = "hmc"
+os.makedirs("{}/{}".format(_SAVE_ADDR_PREFIX, family_name), exist_ok=True)
+
+# load estimates
 with open(os.path.join(_SAVE_ADDR_PREFIX,
                        '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'rb') as file:
     ensemble_sample_val = pk.load(file)
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_node_weight_dict.pkl'.format(family_name)), 'rb') as file:
-    cond_weights_dict_val = pk.load(file)
+""" 6.2. build calibration dataset and fit isotonic regression"""
+sample_size = ensemble_sample_val.shape[0]
+calib_train_id = np.random.choice(
+    calib_sample_id, int(calib_sample_id.size/2))
+calib_test_id = np.asarray(list(set(calib_sample_id) -
+                                set(calib_train_id)))
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'rb') as file:
-    ensemble_weights_val = pk.load(file)
+y_calib = y_valid[calib_train_id]
+y_calib_sample = ensemble_sample_val[:, calib_train_id].T
 
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'rb') as file:
-    ensemble_weight_corr = pk.load(file)
+calib_data = calib_util.build_calibration_dataset(Y_obs=y_calib,
+                                                  Y_sample=y_calib_sample)
 
-base_pred_dict = {key: value for key, value in base_valid_pred.items()
-                  if key in ensemble_model_names}
+with tf.Session() as sess:
+    orig_prob, calib_prob = sess.run(
+        [calib_data["feature"], calib_data["label"]])
 
-visual_util.plot_base_prediction(base_pred=base_pred_dict,
-                                 X_valid=X_valid, y_valid=y_valid,
-                                 X_train=X_train, y_train=y_train,
-                                 save_addr=os.path.join(
-                                     _SAVE_ADDR_PREFIX,
-                                     "{}/ensemble_base_model_fit.png".format(family_name)))
+plt.plot([[0., 0.], [1., 1.]])
+sns.regplot(orig_prob, calib_prob, fit_reg=False)
 
-""" 4.4.3. visualize: ensemble posterior predictive mean """
+# fit isotonic regression
+ir = IsotonicRegression(y_min=0, y_max=1, out_of_bounds='clip')
+ir.fit(orig_prob, calib_prob)
 
-posterior_mean_mu = np.nanmean(ensemble_mean_val, axis=0)
-posterior_mean_cov = np.nanvar(ensemble_mean_val, axis=0)
+orig_prob_pred = np.linspace(0, 1, num=sample_size)
+calib_prob_pred = ir.predict(orig_prob_pred)
 
-posterior_mean_median = np.nanmedian(ensemble_mean_val, axis=0)
-posterior_mean_quantiles = [
-    np.percentile(ensemble_mean_val,
-                  [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
-    for q in [68, 95, 99]
+# plt.plot([[0., 0.], [1., 1.]])
+# sns.regplot(orig_prob, calib_prob,
+#             fit_reg=False, scatter_kws={'color': 'green'})
+#
+# sns.regplot(orig_prob_pred, calib_prob_pred,
+#             fit_reg=False, marker='+',
+#             scatter_kws={'color': 'red'})
+# plt.show()
+
+""" 6.3. produce calibrated posterior sample"""
+# specifically, for samples corresponding to each observation,
+# produce a empirical cdf in the form of quantiles.
+
+ensemble_sample_calib_val = [
+    sample_ecdf(n_sample=1000,
+                base_sample=base_sample,
+                quantile=calib_prob_pred) for
+    base_sample in ensemble_sample_val.T
 ]
+ensemble_sample_calib_val = np.asarray(ensemble_sample_calib_val).T
 
-visual_util.gpr_1d_visual(posterior_mean_mu,
-                          pred_cov=posterior_mean_cov,
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Mean, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_mean.png".format(family_name))
-                          )
+# # plot original vs calibrated cdf
+# sample_id = 50
+# plt.plot(np.sort(ensemble_sample_val[:, sample_id]),
+#          orig_prob_pred)
+# plt.plot(np.sort(ensemble_sample_val[:, sample_id]),
+#          calib_prob_pred)
 
-visual_util.gpr_1d_visual(posterior_mean_median,
-                          pred_cov=None,
-                          pred_quantiles=posterior_mean_quantiles,
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Mean Quantiles, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_mean_quantile.png".format(family_name))
-                          )
+""" 6.4.1. visualize: ensemble posterior reliability """
+os.makedirs(os.path.join(_SAVE_ADDR_PREFIX,
+                         "{}/calibration/".format(family_name)),
+            exist_ok=True)
 
-visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
-                          pred_samples=list(ensemble_mean_val)[:2500],
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Samples, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_sample.png".format(family_name))
-                          )
+posterior_dist_mu = np.nanmean(ensemble_sample_calib_val, axis=0)
+posterior_dist_cov = np.nanvar(ensemble_sample_calib_val, axis=0)
 
-""" 4.4.4. visualize: ensemble residual """
-
-posterior_resid_mu = np.nanmean(ensemble_resid_valid_sample, axis=0)
-posterior_resid_cov = np.nanvar(ensemble_resid_valid_sample, axis=0)
-
-posterior_resid_median = np.nanmedian(ensemble_resid_valid_sample, axis=0)
-posterior_resid_quantiles = [
-    np.percentile(ensemble_resid_valid_sample,
-                  [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
-    for q in [68, 95, 99]
-]
-
-visual_util.gpr_1d_visual(posterior_resid_mu,
-                          pred_cov=posterior_resid_cov,
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_resid.png".format(family_name))
-                          )
-
-visual_util.gpr_1d_visual(posterior_resid_median,
-                          pred_cov=None,
-                          pred_quantiles=posterior_resid_quantiles,
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual Quantiles, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_resid_quantile.png".format(family_name))
-                          )
-
-visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
-                          pred_samples=list(ensemble_resid_valid_sample)[:2500],
-                          X_train=X_test, y_train=y_test,
-                          X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual Samples, {}".format(family_name_full),
-                          save_addr=os.path.join(
-                              _SAVE_ADDR_PREFIX,
-                              "{}/ensemble_posterior_resid_sample.png".format(family_name))
-                          )
-
-""" 4.4.5. visualize: ensemble posterior full """
-
-posterior_dist_mu = np.nanmean(ensemble_sample_val, axis=0)
-posterior_dist_cov = np.nanvar(ensemble_sample_val, axis=0)
-
-posterior_dist_median = np.nanmedian(ensemble_sample_val, axis=0)
+posterior_dist_median = np.nanmedian(ensemble_sample_calib_val, axis=0)
 posterior_dist_quantiles = [
-    np.percentile(ensemble_sample_val,
+    np.percentile(ensemble_sample_calib_val,
                   [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
     for q in [68, 95, 99]
 ]
@@ -1341,7 +1999,7 @@ visual_util.gpr_1d_visual(posterior_dist_mu,
                           X_test=X_valid, y_test=y_valid,
                           title="Ensemble Posterior Predictive, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "{}/ensemble_posterior_full.png".format(family_name))
+                                                 "{}/calibration/ensemble_posterior_full.png".format(family_name))
                           )
 
 visual_util.gpr_1d_visual(posterior_dist_median,
@@ -1351,52 +2009,33 @@ visual_util.gpr_1d_visual(posterior_dist_median,
                           X_test=X_valid, y_test=y_valid,
                           title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "{}/ensemble_posterior_full_quantile.png".format(family_name))
+                                                 "{}/calibration/ensemble_posterior_full_quantile.png".format(family_name))
                           )
 visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
-                          pred_samples=list(ensemble_sample_val)[:2500],
+                          pred_samples=list(ensemble_sample_calib_val)[:150],
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
                           title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "{}/ensemble_posterior_full_sample.png".format(family_name))
+                                                 "{}/calibration/ensemble_posterior_full_sample.png".format(family_name))
                           )
 
-""" 4.4.6. visualize: ensemble posterior reliability """
+""" 6.4.2. visualize: ensemble posterior reliability """
+y_calib = y_valid[calib_test_id]
+y_sample_calib = ensemble_sample_calib_val[:, calib_test_id].T
 
 visual_util.prob_calibration_1d(
-    y_valid, ensemble_sample_val.T,
+    y_calib, y_sample_calib,
     title="Ensemble, {}".format(family_name_full),
     save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                           "{}/ensemble_calibration_prob.png".format(family_name)))
+                           "{}/calibration/ensemble_calibration_prob_test.png".format(family_name)))
 
-visual_util.marginal_calibration_1d(
-    y_valid, ensemble_sample_val.T,
+# overall
+y_calib = y_valid[calib_sample_id]
+y_sample_calib = ensemble_sample_calib_val[:, calib_sample_id].T
+
+visual_util.prob_calibration_1d(
+    y_calib, y_sample_calib,
     title="Ensemble, {}".format(family_name_full),
     save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                           "{}/ensemble_calibration_marginal.png".format(family_name)))
-
-""" 4.4.7. visualize: base ensemble weight with uncertainty """
-visual_util.plot_ensemble_weight_mean_1d(X=X_valid, weight_sample=ensemble_weights_val,
-                                         model_names=ensemble_model_names,
-                                         save_addr_prefix=os.path.join(
-                                             _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
-
-visual_util.plot_ensemble_weight_median_1d(X=X_valid, weight_sample=ensemble_weights_val,
-                                           model_names=ensemble_model_names,
-                                           save_addr_prefix=os.path.join(
-                                               _SAVE_ADDR_PREFIX, "{}/ensemble_model".format(family_name)))
-
-# model family weights
-ensemble_weights_family = np.stack(
-    [cond_weights_dict_val[key] for key in family_tree_dict['root']], axis=-1)
-visual_util.plot_ensemble_weight_mean_1d(X=X_valid,
-                                         weight_sample=ensemble_weights_family,
-                                         model_names=family_tree_dict['root'],
-                                         save_addr_prefix=os.path.join(
-                                             _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
-visual_util.plot_ensemble_weight_median_1d(X=X_valid,
-                                           weight_sample=ensemble_weights_family,
-                                           model_names=family_tree_dict['root'],
-                                           save_addr_prefix=os.path.join(
-                                               _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
+                           "{}/calibration/ensemble_calibration_prob.png".format(family_name)))
