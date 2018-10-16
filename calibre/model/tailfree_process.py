@@ -117,7 +117,14 @@ def get_leaf_ancestry(family_tree):
     leaf_ancestry_dict = dict()
 
     for leaf_model in leaf_model_names:
-        ancestry_list = [leaf_model, parent_name_dict[leaf_model]]
+        ancestry_list = [leaf_model]
+        # append immediate parent
+        if parent_name_dict[leaf_model] == ROOT_NODE_DEFAULT_NAME:
+            leaf_ancestry_dict[leaf_model] = ancestry_list
+            continue
+        else:
+            ancestry_list.append(parent_name_dict[leaf_model])
+        # append rest of ancestors
         while True:
             child_name = ancestry_list[-1]
             parent_name = parent_name_dict[child_name]
