@@ -14,9 +14,12 @@ import calibre.util.metric as metric_util
 def gpr_1d_visual(pred_mean,
                   pred_cov=None, pred_quantiles=[],
                   pred_samples=None,
-                  X_train=None, y_train=None, X_test=None, y_test=None, X_induce=None,
+                  X_train=None, y_train=None,
+                  X_test=None, y_test=None, X_induce=None,
                   quantile_colors=None, quantile_alpha=0.1,
-                  title="", save_addr=""):
+                  y_range=[-4.5, 4.5], add_reference=False,
+                  title="", save_addr="",
+                  ):
     """Plots the GP posterior predictive mean and uncertainty.
 
     Args:
@@ -104,7 +107,11 @@ def gpr_1d_visual(pred_mean,
             plt.axvline(x=x_vertical, c='black', alpha=.2)
 
     plt.title(title)
-    plt.ylim([-4.5, 4.5])
+    if y_range is not None:
+        plt.ylim(y_range)
+
+    if add_reference:
+        plt.axhline(y=0, c='black')
 
     if save_addr:
         plt.savefig(save_addr)
