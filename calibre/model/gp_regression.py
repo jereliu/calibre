@@ -105,6 +105,11 @@ def model_mixture(X, ls=1., n_mix=2, ridge_factor=1e-3):
 def model_mixture_adaptve(X, ls=1., n_mix=2, ridge_factor=1e-3):
     """Defines the Daptive Mixture of Gaussian Process Model.
 
+    Note: Currently this method is not tested and is likely to not
+        work well due to explicit sampling of membership variables.
+        (i.e. mix_member). More work need to be done to perform
+        integrated sampling.
+
     Args:
         X: (np.ndarray of float32) input training features.
         with dimension (N, D).
@@ -115,6 +120,12 @@ def model_mixture_adaptve(X, ls=1., n_mix=2, ridge_factor=1e-3):
     Returns:
          (tf.Tensors of float32) model parameters.
     """
+    # TODO(jereliu): find a way to integrate over adaptive mixture.
+    raise Warning("Currently this method is not tested and is likely to not"
+                  "work well due to explicit sampling of membership variables. "
+                  "(i.e. mix_member). More work need to be done to perform "
+                  "integrated sampling.")
+
     N = X.shape[0]
     K_mat = rbf(X, ls=ls, ridge_factor=ridge_factor)
 
@@ -192,8 +203,8 @@ def model_mixture_adaptve2(X, ls=1., n_mix=2, ridge_factor=1e-3):
         name="gp_f"
     )
 
-    sigma = ed.Normal(loc=tf.ones(n_mix)*-5.,
-                      scale=tf.ones(n_mix)*1., name='sigma')
+    sigma = ed.Normal(loc=tf.ones(n_mix) * -5.,
+                      scale=tf.ones(n_mix) * 1., name='sigma')
 
     y = ed.MixtureSameFamily(
         components_distribution=tfd.MultivariateNormalDiag(

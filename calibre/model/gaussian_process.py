@@ -12,7 +12,8 @@
         Deep Gaussian Processes with Decoupled Inducing Inputs.
         _arXiv preprint arXiv:1801.02939_, 2018.
         https://arxiv.org/pdf/1801.02939.pdf
-
+[4]:    Carl Rasmussen and Christopher Williams. Gaussian Processes for Machine Learning.
+        _The MIT Press. ISBN 0-262-18253-X_. 2006
 """
 import numpy as np
 
@@ -25,23 +26,28 @@ from tensorflow.python.ops.distributions.util import fill_triangular
 tfd = tfp.distributions
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
-""" Helper functions """
+""" Kernel function """
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
 def square_dist(X, X2=None, ls=1.):
     """Computes Square distance between two sets of features.
 
-    Taken from GPflow.kernels.Stationary.
+    Referenced from GPflow.kernels.Stationary.
 
     Args:
-        X: (np.ndarray) First set of features of dim N x D.
-        X2: (np.ndarray or None) Second set of features of dim N2 x D.
+        X: (tf.Tensor) First set of features of dim N x D.
+        X2: (tf.Tensor or None) Second set of features of dim N2 x D.
         ls: (float) value for length scale.
 
     Returns:
-        (tf.Tensor) A N_new x N tensor for ||x-x'||^2
+        (tf.Tensor) A N x N2 tensor for ||x-x'||^2 / ls**2
+
+    Raises:
+        (ValueError) If feature dimension of X and X2 disagrees.
     """
+    N, D = X.shape
+
     X = X / ls
     Xs = tf.reduce_sum(tf.square(X), axis=1)
 
@@ -49,6 +55,10 @@ def square_dist(X, X2=None, ls=1.):
         dist = -2 * tf.matmul(X, X, transpose_b=True)
         dist += tf.reshape(Xs, (-1, 1)) + tf.reshape(Xs, (1, -1))
         return tf.clip_by_value(dist, 0., np.inf)
+
+    N2, D2 = X2.shape
+    if D != D2:
+        raise ValueError('Dimension of X and X2 does not match.')
 
     X2 = X2 / ls
     X2s = tf.reduce_sum(tf.square(X2), axis=1)
@@ -60,14 +70,16 @@ def square_dist(X, X2=None, ls=1.):
 def rbf(X, X2=None, ls=1., ridge_factor=0.):
     """Defines RBF kernel.
 
+     k(x, x') = - exp(- |x-x'| / ls**2)
+
     Args:
-        X: (np.ndarray) First set of features of dim N x D.
-        X2: (np.ndarray or None) Second set of features of dim N2 x D.
+        X: (tf.Tensor) First set of features of dim N x D.
+        X2: (tf.Tensor or None) Second set of features of dim N2 x D.
         ls: (float) value for length scale
         ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
 
     Returns:
-        (tf.Tensor) A N x N2 tensor for exp(-||x-x'||^2/2*ls)
+        (tf.Tensor) A N x N2 tensor for exp(-||x-x'||**2 / 2 * ls**2)
     """
     if ridge_factor:
         ridge_mat = ridge_factor * tf.eye(X.shape[0])
