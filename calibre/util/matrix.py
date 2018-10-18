@@ -46,3 +46,27 @@ def corr_mat(X, axis=0, N_max=5000):
 
 def replicate_along_zero_axis(A, n_replicate):
     return tf.ones([n_replicate] + [1] * (len(A.shape))) * A
+
+
+def make_block_matrix(M_00, M_01, M_11=None, ridge_factor=0.):
+    """Creates block matrix."""
+    if isinstance(M_00, np.ndarray):
+        if M_11 is not None:
+            block_mat = np.block([[M_00, M_01],
+                                  [M_01.T, M_11]])
+            ridge_mat = ridge_factor * np.eye(block_mat.shape[0])
+            return block_mat + ridge_mat
+        else:
+            return np.block([M_00, M_01])
+
+    elif isinstance(M_00, tf.Tensor):
+        if M_11 is not None:
+            row_1 = tf.concat([M_00, M_01], axis=1)
+            row_2 = tf.concat([tf.transpose(M_01), M_11], axis=1)
+
+            concat_mat = tf.concat([row_1, row_2], axis=0)
+            ridge_mat = ridge_factor * tf.eye(concat_mat.shape.as_list()[0])
+            return concat_mat + ridge_mat
+        else:
+            return tf.concat([M_00, M_01], axis=1)
+
