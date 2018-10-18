@@ -40,6 +40,8 @@ from tensorflow_probability import edward2 as ed
 import calibre.model.gaussian_process as gp
 import calibre.model.gp_regression as gpr
 
+import calibre.util.matrix as matrix_util
+
 from tensorflow.python.ops.distributions.util import fill_triangular
 
 tfd = tfp.distributions
@@ -148,7 +150,7 @@ def rbf_hess_1d(X, X2=None, ls=1., ridge_factor=0.):
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
-def deriv_prior(f, X, ls,
+def deriv_prior(f, X, X_deriv=None, ls=1.,
                 kernel_func=gp.rbf,
                 grad_func=rbf_grad_1d,
                 hess_func=rbf_hess_1d,
@@ -168,6 +170,8 @@ def deriv_prior(f, X, ls,
     Args:
         f: (ed.RandomVariable) Gaussian Process prior
         X: (tf.Tensor) Features with dimension (N, D).
+        X_deriv: (tf.Tensor or None) Feature location to place derivative
+            constraint on shape (N_deriv, D). If None, X_deriv=X
         ls: (tf.Tensor of float32) length scale parameter for kernel function.
         kernel_func: (function) Model's kernel function, default to gp.rbf
         grad_func: (function) Gradient kernel function for kernel_func
@@ -178,9 +182,12 @@ def deriv_prior(f, X, ls,
     Returns:
         (ed.RandomVariable) Conditional Prior for Gaussian Process Derivative.
     """
+    if X_deriv is None:
+        X_deriv = X
+
     # compute basic components
-    dK = grad_func(X, ls=ls)
-    ddK = hess_func(X, ls=ls, ridge_factor=ridge_factor)
+    dK = grad_func(X_deriv, X, ls=ls)
+    ddK = hess_func(X_deriv, ls=ls, ridge_factor=ridge_factor)
     K = kernel_func(X, ls=ls, ridge_factor=ridge_factor)
     K_inv = tf.matrix_inverse(K)
 
@@ -193,12 +200,14 @@ def deriv_prior(f, X, ls,
                                      name=name)
 
 
-def model(X, ls=1., ridge_factor=1e-3):
+def model(X, X_deriv=None, ls=1., ridge_factor=1e-3):
     """Defines the Gaussian Process Model with derivative random variable.
 
     Args:
         X: (np.ndarray of float32) input training features.
         with dimension (N, D).
+        X_deriv: (tf.Tensor or None) Feature location to place derivative
+            constraint on shape (N_deriv, D). If None, X_deriv=X
         ls: (float32) length scale parameter.
         ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
 
@@ -212,7 +221,8 @@ def model(X, ls=1., ridge_factor=1e-3):
 
     gp_f = gp.prior(X, ls, kernel_func=gp.rbf,
                     ridge_factor=ridge_factor, name="gp_f")
-    gp_f_deriv = deriv_prior(gp_f, X, ls, kernel_func=gp.rbf,
+    gp_f_deriv = deriv_prior(gp_f, X, X_deriv, ls,
+                             kernel_func=gp.rbf,
                              grad_func=rbf_grad_1d, hess_func=rbf_hess_1d,
                              ridge_factor=ridge_factor, name="gp_f_deriv")
 
@@ -226,11 +236,110 @@ def model(X, ls=1., ridge_factor=1e-3):
 
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+""" Posterior sampling """
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+
+def sample_posterior_predictive(X_new, X_obs, X_deriv,
+                                f_sample, f_deriv_sample,
+                                kernel_func_ff=gp.rbf,
+                                kernel_func_df=rbf_grad_1d,
+                                kernel_func_dd=rbf_hess_1d,
+                                ls=None, ridge_factor=1e-3):
+    """Sample posterior predictive of f based on f_train and f_derive.
+
+    The full joint likelihood of f_new (f_n), f_obs (f_o), f_deriv (f_d) is:
+
+                    [[f_n]
+                     [f_o]  ~ N(0, K)
+                     [f_d]]
+
+    where (denote K'/K'' the gradient/hessian kernel matrix)
+
+                    [K_nn   K_no    K'_nd]
+            K    =  [K_on   K_oo    K'_od]
+                    [K'_dn  K'_do   K''_dd]
+
+    Therefore, if we denote
+        K_n_od = [K_no, K'_nd]      and     K_odod =    [K_oo    K'_od]
+                                                        [K'_do   K''_dd]
+
+    then
+        f_n ~ N(Mu, Sigma), where (note * is matrix product here):
+
+        Mu = K_n_od * inv(K_odod) * [f_o, f_d]^T
+        Sigma = K_nn - K_n_od * inv(K_odod) * K_n_od^T
+
+    Args:
+        X_new: (np.ndarray of float32) testing locations, N_new x D
+        X_obs: (np.ndarray of float32) training locations, N_obs x D
+        X_deriv: (np.ndarray of float32) training locations, N_deriv x D
+        f_sample: (np.ndarray of float32) Samples for f in training set,
+            N_train x N_sample
+        f_deriv_sample: (np.ndarray of float32) Samples for f_deriv,
+            N_deriv x N_sample
+        kernel_func_ff: (function) kernel function for k(x, x')
+        kernel_func_df: (function) gradient kernel function dx k(x, x')
+        kernel_func_dd: (function) hessian kernel function dxdx' k(x, x')
+        ls: (float32) Length scale parameter
+        ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
+
+    Returns:
+         (np.ndarray of float32) N_new x N_sample vectors of posterior
+            predictive samples.
+
+    Raises:
+        (ValueError) If length scale parameter is not provided.
+    """
+    N_new = X_new.shape[0]
+    _, N_sample = f_sample.shape
+    _, N_sample_2 = f_deriv_sample.shape
+
+    if N_sample != N_sample_2:
+        raise ValueError('Sample size for f_sample ({}) and '
+                         'f_deriv_sample ({}) must be same.'.format(N_sample, N_sample_2))
+
+    if not ls:
+        raise ValueError('Length scale parameter ("ls") must be provided.')
+
+    # compute matrix components
+    K_nn = kernel_func_ff(X_new, ls=ls)
+
+    K_no = kernel_func_ff(X_new, X_obs, ls=ls)
+    dK_dn = kernel_func_df(X_deriv, X_new, ls=ls)
+
+    K_oo = kernel_func_ff(X_obs, ls=ls)
+    dK_do = kernel_func_df(X_deriv, X_obs, ls=ls)
+    ddK_dd = kernel_func_dd(X_deriv, ls=ls)
+
+    # assemble matrix and sample
+    K_n_od = matrix_util.make_block_matrix(K_no, tf.transpose(dK_dn))
+    K_odod = matrix_util.make_block_matrix(K_oo, tf.transpose(dK_do), ddK_dd,
+                                           ridge_factor=ridge_factor)
+    K_odod_inv = tf.matrix_inverse(K_odod)
+
+    f_sample_all = tf.concat([f_sample, f_deriv_sample], axis=0)
+
+    # compute conditional mean and variance.
+    mu_sample = tf.matmul(K_n_od, tf.matmul(K_odod_inv, f_sample_all))
+    Sigma = K_nn - tf.matmul(K_n_od, tf.matmul(K_odod_inv, K_n_od, transpose_b=True))
+
+    # sample
+    with tf.Session() as sess:
+        cond_means, cond_cov = sess.run([mu_sample, Sigma])
+
+    f_new_centered = np.random.multivariate_normal(
+        mean=[0] * N_new, cov=cond_cov, size=N_sample).T
+    f_new = f_new_centered + cond_means
+    return f_new.astype(np.float32)
+
+
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 """ Variational family I: Mean field """
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
-def variational_mfvi(X, ls,
+def variational_mfvi(X, X_deriv=None, ls=1.,
                      kernel_func=gp.rbf,
                      grad_func=rbf_grad_1d,
                      hess_func=rbf_hess_1d,
@@ -243,8 +352,10 @@ def variational_mfvi(X, ls,
         qf_mean = dK^T ddK qf_deriv_mean
 
     Args:
-        X: (np.ndarray of float32) input training features.
-        with dimension (N, D).
+        X: (np.ndarray of float32) input training features,
+            with dimension (N, D).
+        X_deriv: (tf.Tensor or None) Feature location to place derivative
+            constraint on shape (Nd, D). If None, X_deriv=X
         ls: (tf.Tensor of float32) length scale parameter for kernel function.
         kernel_func: (function) Model's kernel function, default to gp.rbf
         grad_func: (function) Gradient kernel function for kernel_func
@@ -256,17 +367,26 @@ def variational_mfvi(X, ls,
             (ed.RandomVariable) variational family.
         q_f_mean, q_f_sdev, qf_deriv_mean, qf_deriv_sdev:
             (tf.Variable) variational parameters for q_f
+
+    Raises:
+        (ValueError) If Feature dimension of X and X_deriv are not same.
     """
     N, D = X.shape
+    Nd, Dd = X_deriv.shape
+
+    if D != Dd:
+        raise ValueError("Feature dimension of X and X_deriv must be same!")
 
     # compute basic components
-    dK = grad_func(X, ls=ls)
-    ddK = hess_func(X, ls=ls, ridge_factor=ridge_factor)
+    dK = grad_func(X_deriv, X, ls=ls)
+    ddK = hess_func(X_deriv, ls=ls, ridge_factor=ridge_factor)
     ddK_inv = tf.matrix_inverse(ddK)
 
     # define variational parameters
-    qf_deriv_mean = tf.get_variable(shape=[N], name='qf_deriv_mean')
-    qf_deriv_sdev = tf.exp(tf.get_variable(shape=[N], name='qf_deriv_sdev'))
+    qf_deriv_mean = tf.get_variable(shape=[Nd],
+                                    name='qf_deriv_mean')
+    qf_deriv_sdev = tf.exp(tf.get_variable(shape=[Nd],
+                                           name='qf_deriv_sdev'))
 
     qf_mean = tf.squeeze(tf.matmul(
         dK, tf.matmul(ddK_inv, tf.expand_dims(qf_deriv_mean, -1)),
@@ -316,7 +436,7 @@ Consequently, U can be marginalized out, such that q(F) becomes
 """
 
 
-def variational_sgpr(X, Z, ls=1.,
+def variational_sgpr(X, Z, X_deriv=None, ls=1.,
                      kern_func=gp.rbf,
                      grad_func=rbf_grad_1d,
                      hess_func=rbf_hess_1d,
@@ -330,6 +450,8 @@ def variational_sgpr(X, Z, ls=1.,
     Args:
         X: (np.ndarray of float32) input training features, with dimension (Nx, D).
         Z: (np.ndarray of float32) inducing points, with dimension (Nz, D).
+        X_deriv: (tf.Tensor or None) Feature location to place derivative
+            constraint on shape (N_deriv, D). If None, X_deriv=X
         ls: (float32) length scale parameter.
         kern_func: (function) kernel function.
         grad_func: (function) Gradient kernel function for kernel_func
@@ -341,13 +463,21 @@ def variational_sgpr(X, Z, ls=1.,
             (ed.RandomVariable) variational family.
         q_f_mean, q_f_sdev, qf_deriv_mean, qf_deriv_sdev:
             (tf.Variable) variational parameters for q_f
+            
+    Raises:
+        (ValueError) If Feature dimension of X / X_deriv / Z are not same.
     """
-    Nx, Nz = X.shape[0], Z.shape[0]
+    Nx, D = X.shape
+    Nd, Dd = X_deriv.shape
+    Nz, Dz = Z.shape
+
+    if D != Dd or D != Dz:
+        raise ValueError("Feature dimension of X, X_deriv, Z must be same!")
 
     # 1. Prepare constants
     # compute matrix constants
-    dK = grad_func(X, ls=ls)
-    ddK = hess_func(X, ls=ls, ridge_factor=ridge_factor)
+    dK = grad_func(X_deriv, X, ls=ls)
+    ddK = hess_func(X_deriv, ls=ls, ridge_factor=ridge_factor)
     ddK_inv = tf.matrix_inverse(ddK)
 
     Kxx = kern_func(X, ls=ls)
@@ -376,8 +506,8 @@ def variational_sgpr(X, Z, ls=1.,
 
     # compute sparse gp variational parameter (i.e. mean and covariance of P(f_obs | f_latent))
     # define variational parameters
-    qf_deriv_mean = tf.get_variable(shape=[Nx], name='qf_deriv_mean')
-    qf_deriv_sdev = tf.exp(tf.get_variable(shape=[Nx], name='qf_deriv_sdev'))
+    qf_deriv_mean = tf.get_variable(shape=[Nd], name='qf_deriv_mean')
+    qf_deriv_sdev = tf.exp(tf.get_variable(shape=[Nd], name='qf_deriv_sdev'))
 
     qf_mean = tf.squeeze(tf.matmul(
         dK, tf.matmul(ddK_inv, tf.expand_dims(qf_deriv_mean, -1)),

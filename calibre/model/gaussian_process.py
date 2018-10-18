@@ -153,7 +153,11 @@ def sample_posterior_mean(X_new, X, f_sample, ls, kern_func=rbf, ridge_factor=1e
     return tf.matmul(Kx, K_inv_f, transpose_a=True)
 
 
-def sample_posterior_full(X_new, X, f_sample, ls, kernel_func=rbf, ridge_factor=1e-3):
+def sample_posterior_full(X_new, X, f_sample, ls,
+                          kernel_func=rbf,
+                          kernel_func_xn=None,
+                          kernel_func_nn=None,
+                          ridge_factor=1e-3):
     """Sample posterior predictive distribution.
 
     Sample posterior conditional from f^* | f ~ MVN, where:
@@ -167,17 +171,27 @@ def sample_posterior_full(X_new, X, f_sample, ls, kernel_func=rbf, ridge_factor=
         f_sample: (np.ndarray of float32) M samples of posterior GP sample,
             N_obs x N_sample
         ls: (float) training lengthscale
-        kernel_func: (function) kernel function.
+        kernel_func: (function) kernel function for distance among X.
+        kernel_func_xn: (function or None) kernel function for distance between X and X_new,
+            if None then set to kernel_func.
+        kernel_func_nn: (function or None) kernel function for distance among X_new,
+            if None then set to kernel_func.
         ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition.
+
     Returns:
          (np.ndarray of float32) N_new x M vectors of posterior predictive mean samples
     """
     N_new, _ = X_new.shape
     N, M = f_sample.shape
 
+    if kernel_func_xn is None:
+        kernel_func_xn = kernel_func
+    if kernel_func_nn is None:
+        kernel_func_nn = kernel_func
+
     # compute basic components
-    Kxx = kernel_func(X_new, X_new, ls=ls)
-    Kx = kernel_func(X, X_new, ls=ls)
+    Kxx = kernel_func_nn(X_new, X_new, ls=ls)
+    Kx = kernel_func_xn(X, X_new, ls=ls)
     K = kernel_func(X, ls=ls, ridge_factor=ridge_factor)
     K_inv = tf.matrix_inverse(K)
 

@@ -10,7 +10,6 @@
         _35th International Conference on Machine Learning_, 2018.
         http://proceedings.mlr.press/v80/lorenzi18a.html
 """
-# TODO(jereliu): Allow pseudo positions for gradient constraint
 # TODO(jereliu): Try on real calibration data.
 
 import os
@@ -49,18 +48,24 @@ DEFAULT_DERIV_CDF_SCALE = 0.001
 # 1. Generate data
 """""""""""""""""""""""""""""""""
 N = 50
+N_deriv = 20
 
+# training data
 X_train, y_train = generate_1d_data(N=N, f=sin_curve_1d,
                                     noise_sd=0.03, seed=100,
                                     uniform_x=True)
 X_train = np.expand_dims(X_train, 1).astype(np.float32)
 y_train = y_train.astype(np.float32)
-std_y_train = np.std(y_train)
 
+std_y_train = np.std(y_train)
+N, D = X_train.shape
+
+# test data
 X_test = np.expand_dims(np.linspace(-1, 2, 100), 1).astype(np.float32)
 y_test = sin_curve_1d(X_test)
 
-N, D = X_train.shape
+# location to impose positivity constraint on f'
+X_deriv = np.expand_dims(np.linspace(-1, 2, N_deriv), -1).astype(np.float32)
 
 #
 plt.plot(np.linspace(-0.5, 1.5, 100),
@@ -72,6 +77,8 @@ plt.close()
 """""""""""""""""""""""""""""""""
 # 2. MCMC
 """""""""""""""""""""""""""""""""
+# TODO(jereliu): sample conditional posterior of full gp conditional on derivative
+
 """2.1. sampler basic config"""
 num_results = 5000
 num_burnin_steps = 5000
@@ -91,16 +98,16 @@ with mcmc_graph.as_default():
         log_deriv_lkhd = tfd.Normal(
             loc=0., scale=DEFAULT_DERIV_CDF_SCALE).log_cdf(gp_f_deriv)
         log_joint_rest = log_joint(
-            X_train, y=y_train,
+            X=X_train, X_deriv=X_deriv, y=y_train,
             ls=DEFAULT_LS_VAL, ridge_factor=5e-3,
             gp_f=gp_f, gp_f_deriv=gp_f_deriv, sigma=sigma)
-        return tf.reduce_sum(log_deriv_lkhd) + log_joint_rest
+        return tf.reduce_mean(log_deriv_lkhd) + log_joint_rest
 
 
     # set up state container
     initial_state = [
         tf.random_normal([N], stddev=0.01, name='init_gp_func'),
-        tf.random_normal([N], stddev=0.01, name='init_gp_derv'),
+        tf.random_normal([N_deriv], stddev=0.01, name='init_gp_derv'),
         tf.constant(0.1, name='init_sigma'),
     ]
 
@@ -138,7 +145,7 @@ with tf.Session(graph=mcmc_graph) as sess:
     init_op.run()
     [
         f_samples_val,
-        f_deriv_sample_val,
+        f_deriv_samples_val,
         sigma_sample_val,
         is_accepted_,
     ] = sess.run(
@@ -153,15 +160,20 @@ with tf.Session(graph=mcmc_graph) as sess:
 
 """ 2.3. prediction and visualization"""
 # prediction
-f_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
-                                      f_sample=f_samples_val.T,
-                                      ls=DEFAULT_LS_VAL,
-                                      kernel_func=gp.rbf)
-
-df_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
-                                       f_sample=f_deriv_sample_val.T,
+df_test_val = gp.sample_posterior_full(X_new=X_test, X=X_deriv,
+                                       f_sample=f_deriv_samples_val.T,
                                        ls=DEFAULT_LS_VAL,
                                        kernel_func=gpr_mono.rbf_hess_1d)
+# sample f conditional on f_deriv
+f_test_val = gpr_mono.sample_posterior_predictive(X_new=X_test,
+                                                  X_obs=X_train,
+                                                  X_deriv=X_deriv,
+                                                  f_sample=f_samples_val.T,
+                                                  f_deriv_sample=f_deriv_samples_val.T,
+                                                  kernel_func_ff=gp.rbf,
+                                                  kernel_func_df=gpr_mono.rbf_grad_1d,
+                                                  kernel_func_dd=gpr_mono.rbf_hess_1d,
+                                                  ls=DEFAULT_LS_VAL, )
 
 # visualize
 mu = np.mean(f_test_val, axis=1)
@@ -178,6 +190,7 @@ visual_util.gpr_1d_visual(mu, cov,
 visual_util.gpr_1d_visual(mu_deriv, cov_deriv,
                           X_train=X_train, y_train=y_train,
                           X_test=X_test, y_test=y_test,
+                          X_induce=X_deriv,
                           title="RBF Derivative, Hamilton MC",
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX, "hmc_gpr_deriv.png"),
                           add_reference=True)
@@ -194,6 +207,7 @@ with mfvi_graph.as_default():
     (q_f, q_f_deriv, q_sig,
      qf_mean, qf_sdev,
      qf_deriv_mean, qf_deriv_sdev) = gpr_mono.variational_mfvi(X=X_train,
+                                                               X_deriv=X_deriv,
                                                                ls=DEFAULT_LS_VAL)
 
     # compute the expected predictive log-likelihood
@@ -201,7 +215,9 @@ with mfvi_graph.as_default():
         with ed.interception(make_value_setter(gp_f=q_f,
                                                gp_f_deriv=q_f_deriv,
                                                sigma=q_sig)):
-            _, gp_f_deriv, _, y, _ = gpr_mono.model(X=X_train, ls=DEFAULT_LS_VAL)
+            _, gp_f_deriv, _, y, _ = gpr_mono.model(X=X_train,
+                                                    X_deriv=X_deriv,
+                                                    ls=DEFAULT_LS_VAL)
 
     # add penalized likelihood
     # TODO(jereliu): move to gpr_mono
@@ -262,16 +278,21 @@ with tf.Session() as sess:
                                                    f_deriv_samples])
     sess.close()
 
-# still use exact posterior predictive
-f_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
-                                      f_sample=f_samples_val.T,
-                                      ls=DEFAULT_LS_VAL,
-                                      kernel_func=gp.rbf)
-
-df_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
-                                       f_sample=f_deriv_sample_val.T,
+# prediction, note we sample f conditional on f_deriv
+df_test_val = gp.sample_posterior_full(X_new=X_test, X=X_deriv,
+                                       f_sample=f_deriv_samples_val.T,
                                        ls=DEFAULT_LS_VAL,
                                        kernel_func=gpr_mono.rbf_hess_1d)
+
+f_test_val = gpr_mono.sample_posterior_predictive(X_new=X_test,
+                                                  X_obs=X_train,
+                                                  X_deriv=X_deriv,
+                                                  f_sample=f_samples_val.T,
+                                                  f_deriv_sample=f_deriv_samples_val.T,
+                                                  kernel_func_ff=gp.rbf,
+                                                  kernel_func_df=gpr_mono.rbf_grad_1d,
+                                                  kernel_func_dd=gpr_mono.rbf_hess_1d,
+                                                  ls=DEFAULT_LS_VAL, )
 
 # visualize
 mu = np.mean(f_test_val, axis=1)
@@ -288,6 +309,7 @@ visual_util.gpr_1d_visual(mu, cov,
 visual_util.gpr_1d_visual(mu_deriv, cov_deriv,
                           X_train=X_train, y_train=y_train,
                           X_test=X_test, y_test=y_test,
+                          X_induce=X_deriv,
                           title="RBF Derivative, Mean-field VI",
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX, "mfvi_gpr_deriv.png"),
                           add_reference=True)
@@ -307,6 +329,7 @@ with sgp_graph.as_default():
      qf_mean, qf_vcov,
      qf_deriv_mean, qf_deriv_sdev) = gpr_mono.variational_sgpr(X=X_train,
                                                                Z=X_induce,
+                                                               X_deriv=X_deriv,
                                                                ls=DEFAULT_LS_VAL)
 
     # compute the expected predictive log-likelihood
@@ -314,7 +337,9 @@ with sgp_graph.as_default():
         with ed.interception(make_value_setter(gp_f=q_f,
                                                gp_f_deriv=q_f_deriv,
                                                sigma=q_sig)):
-            _, gp_f_deriv, _, y, _ = gpr_mono.model(X=X_train, ls=DEFAULT_LS_VAL)
+            _, gp_f_deriv, _, y, _ = gpr_mono.model(X=X_train,
+                                                    X_deriv=X_deriv,
+                                                    ls=DEFAULT_LS_VAL)
 
     # add penalized likelihood
     # TODO(jereliu): move to gpr_mono
@@ -364,8 +389,9 @@ with tf.Session(graph=sgp_graph) as sess:
     sess.close()
 
 """ 4.3. prediction & visualization """
+# sample from posterior
 with tf.Session() as sess:
-    f_samples = gpr_mono.variational_sgpr_sample(n_sample=10000,
+    f_samples = gpr_mono.variational_sgpr_sample(n_sample=5000,
                                                  qf_mean=qf_mean_val,
                                                  qf_cov=qf_vcov_val)
     f_deriv_samples = gpr_mono.variational_mfvi_sample(n_sample=5000,
@@ -375,16 +401,21 @@ with tf.Session() as sess:
                                                    f_deriv_samples])
     sess.close()
 
-# still use exact posterior predictive
-f_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
-                                      f_sample=f_samples_val.T,
-                                      ls=DEFAULT_LS_VAL,
-                                      kernel_func=gp.rbf)
-
-df_test_val = gp.sample_posterior_full(X_new=X_test, X=X_train,
-                                       f_sample=f_deriv_sample_val.T,
+# prediction, note we sample f conditional on f_deriv
+df_test_val = gp.sample_posterior_full(X_new=X_test, X=X_deriv,
+                                       f_sample=f_deriv_samples_val.T,
                                        ls=DEFAULT_LS_VAL,
                                        kernel_func=gpr_mono.rbf_hess_1d)
+
+f_test_val = gpr_mono.sample_posterior_predictive(X_new=X_test,
+                                                  X_obs=X_train,
+                                                  X_deriv=X_deriv,
+                                                  f_sample=f_samples_val.T,
+                                                  f_deriv_sample=f_deriv_samples_val.T,
+                                                  kernel_func_ff=gp.rbf,
+                                                  kernel_func_df=gpr_mono.rbf_grad_1d,
+                                                  kernel_func_dd=gpr_mono.rbf_hess_1d,
+                                                  ls=DEFAULT_LS_VAL, )
 
 # visualize
 mu = np.mean(f_test_val, axis=1)
@@ -401,6 +432,7 @@ visual_util.gpr_1d_visual(mu, cov,
 visual_util.gpr_1d_visual(mu_deriv, cov_deriv,
                           X_train=X_train, y_train=y_train,
                           X_test=X_test, y_test=y_test,
+                          X_induce=X_deriv,
                           title="RBF Derivative, Sparse Gaussian Process",
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX, "sgpr_gpr_deriv.png"),
                           add_reference=True)
