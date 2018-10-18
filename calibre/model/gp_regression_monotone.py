@@ -215,6 +215,7 @@ def model(X, X_deriv=None, ls=1., ridge_factor=1e-3):
     Returns:
          (tf.Tensors of float32) model parameters.
     """
+    # TODO(jereliu): Add predictive prior
     if not ls:
         ls = ed.Normal(loc=-5., scale=1., name='ls')
     else:
@@ -242,7 +243,8 @@ def model(X, X_deriv=None, ls=1., ridge_factor=1e-3):
 
 
 def make_log_likelihood_function(X_train, X_deriv, y_train, ls=None,
-                                 ridge_factor=5e-3, deriv_prior_scale=1e-3):
+                                 ridge_factor=5e-3, deriv_prior_scale=1e-3,
+                                 cdf_constraint=False):
     """Makes log joint likelihood function for monotonic GP regression.
 
     To be used for MCMC sampling.
@@ -258,6 +260,8 @@ def make_log_likelihood_function(X_train, X_deriv, y_train, ls=None,
         deriv_prior_scale: (float32) Value for Prior scale parameter for
             probit likelihood function imposing positivity contraint on
             f_deriv. For detail, see [1].
+        cdf_constraint: (bool) Whether to impose cdf constraint
+            (i.e. f < 0 and f > 1).
 
     Returns:
         (function) A log-joint probability function.
@@ -284,26 +288,46 @@ def make_log_likelihood_function(X_train, X_deriv, y_train, ls=None,
             model_var_kwargs["ls"] = ls
 
         # the probit likelihood on derivative
-        log_lkhd_deriv = tfd.Normal(
+        log_lkhd_constraint = tfd.Normal(
             loc=0., scale=deriv_prior_scale).log_cdf(
             model_var_kwargs["gp_f_deriv"])
+
+        if cdf_constraint:
+            # constraint 1: f > 0
+            log_lkhd_constraint_ge_zero = tfd.Normal(
+                loc=0., scale=deriv_prior_scale).log_cdf(
+                model_var_kwargs["gp_f"])
+            # constraint 2: f < 1
+            log_lkhd_constraint_le_one = tfd.Normal(
+                loc=0., scale=deriv_prior_scale).log_cdf(
+                1 - model_var_kwargs["gp_f"])
+
+            log_lkhd_constraint = tf.concat([
+                log_lkhd_constraint,
+                log_lkhd_constraint_ge_zero,
+                log_lkhd_constraint_le_one
+            ], axis=0)
 
         log_joint_rest = log_joint(
             X=X_train, X_deriv=X_deriv, y=y_train,
             ridge_factor=ridge_factor,
             **model_var_kwargs)
-        return tf.reduce_mean(log_lkhd_deriv) + log_joint_rest
+        return tf.reduce_mean(log_lkhd_constraint) + log_joint_rest
 
     return target_log_prob_fn
 
 
-def make_log_likelihood_tensor(gp_f_deriv, y, y_train,
-                               deriv_prior_scale=1e-3):
+def make_log_likelihood_tensor(gp_f, gp_f_deriv,
+                               y, y_train,
+                               deriv_prior_scale=1e-3,
+                               cdf_constraint=False):
     """Makes log joint likelihood tensor for monotonic GP regression.
 
     To be used for Variational Inference.
 
     Args:
+        gp_f: (ed.RandomVariable) RV from Monotonic GP prob program
+            corresponding to function.
         gp_f_deriv: (ed.RandomVariable) RV from Monotonic GP prob program
             corresponding to function derivative.
         y: (ed.RandomVariable) RV from Monotonic GP prob program
@@ -312,17 +336,33 @@ def make_log_likelihood_tensor(gp_f_deriv, y, y_train,
         deriv_prior_scale: (float32) Value for Prior scale parameter for
             probit likelihood function imposing positivity contraint on
             f_deriv. For detail, see [1].
+        cdf_constraint: (bool) Whether to impose cdf constraint
+            (i.e. f > 0 and f < 1).
 
     Returns:
         (tf.Tensor) A scalar tf.Tensor corresponding to model likelihood,
             with dtype float32
     """
     # probit likelihood for derivative constraint
-    log_lkhd_derv = tfd.Normal(loc=0.,
-                               scale=deriv_prior_scale).log_cdf(gp_f_deriv)
+    log_lkhd_constraint = tfd.Normal(loc=0.,
+                                     scale=deriv_prior_scale).log_cdf(gp_f_deriv)
+    if cdf_constraint:
+        # constraint 1: f > 0
+        log_lkhd_constraint_ge_zero = tfd.Normal(
+            loc=0., scale=deriv_prior_scale).log_cdf(gp_f)
+        # constraint 2: f < 1
+        log_lkhd_constraint_le_one = tfd.Normal(
+            loc=0., scale=deriv_prior_scale).log_cdf(1 - gp_f)
+
+        log_lkhd_constraint = tf.concat([
+            log_lkhd_constraint,
+            log_lkhd_constraint_ge_zero,
+            log_lkhd_constraint_le_one
+        ], axis=0)
+
     # likelihood for the rest of the model parameters
     log_lkhd_rest = y.distribution.log_prob(y_train)
-    return tf.reduce_mean(log_lkhd_derv) + log_lkhd_rest
+    return tf.reduce_mean(log_lkhd_constraint) + log_lkhd_rest
 
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""

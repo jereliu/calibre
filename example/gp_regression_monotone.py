@@ -203,13 +203,14 @@ with mfvi_graph.as_default():
         with ed.interception(make_value_setter(gp_f=q_f,
                                                gp_f_deriv=q_f_deriv,
                                                sigma=q_sig)):
-            _, gp_f_deriv, _, y, _ = gpr_mono.model(X=X_train,
-                                                    X_deriv=X_deriv,
-                                                    ls=DEFAULT_LS_VAL)
+            gp_f, gp_f_deriv, _, y, _ = gpr_mono.model(X=X_train,
+                                                       X_deriv=X_deriv,
+                                                       ls=DEFAULT_LS_VAL)
 
     # add penalized likelihood
     log_likelihood = gpr_mono.make_log_likelihood_tensor(
-        gp_f_deriv, y, y_train, deriv_prior_scale=DEFAULT_DERIV_CDF_SCALE)
+        gp_f, gp_f_deriv, y, y_train,
+        deriv_prior_scale=DEFAULT_DERIV_CDF_SCALE)
 
     # compute the KL divergence
     kl = 0.
@@ -323,13 +324,14 @@ with sgp_graph.as_default():
         with ed.interception(make_value_setter(gp_f=q_f,
                                                gp_f_deriv=q_f_deriv,
                                                sigma=q_sig)):
-            _, gp_f_deriv, _, y, _ = gpr_mono.model(X=X_train,
-                                                    X_deriv=X_deriv,
-                                                    ls=DEFAULT_LS_VAL)
+            gp_f, gp_f_deriv, _, y, _ = gpr_mono.model(X=X_train,
+                                                       X_deriv=X_deriv,
+                                                       ls=DEFAULT_LS_VAL)
 
     # add penalized likelihood
     log_likelihood = gpr_mono.make_log_likelihood_tensor(
-        gp_f_deriv, y, y_train, deriv_prior_scale=DEFAULT_DERIV_CDF_SCALE)
+        gp_f, gp_f_deriv, y, y_train,
+        deriv_prior_scale=DEFAULT_DERIV_CDF_SCALE)
 
     # compute the KL divergence
     kl = 0.
