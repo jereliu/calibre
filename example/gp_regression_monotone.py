@@ -77,7 +77,6 @@ plt.close()
 """""""""""""""""""""""""""""""""
 # 2. MCMC
 """""""""""""""""""""""""""""""""
-# TODO(jereliu): sample conditional posterior of full gp conditional on derivative
 
 """2.1. sampler basic config"""
 num_results = 5000
@@ -87,22 +86,11 @@ num_burnin_steps = 5000
 mcmc_graph = tf.Graph()
 with mcmc_graph.as_default():
     # build likelihood by explicitly
-    log_joint = ed.make_log_joint_fn(gpr_mono.model)
 
-
-    # TODO(jereliu): move to gpr_mono
-    def target_log_prob_fn(gp_f, gp_f_deriv, sigma):
-        """Unnormalized target density as a function of states.
-            with additional likelihood for
-        """
-        log_deriv_lkhd = tfd.Normal(
-            loc=0., scale=DEFAULT_DERIV_CDF_SCALE).log_cdf(gp_f_deriv)
-        log_joint_rest = log_joint(
-            X=X_train, X_deriv=X_deriv, y=y_train,
-            ls=DEFAULT_LS_VAL, ridge_factor=5e-3,
-            gp_f=gp_f, gp_f_deriv=gp_f_deriv, sigma=sigma)
-        return tf.reduce_mean(log_deriv_lkhd) + log_joint_rest
-
+    target_log_prob_fn = gpr_mono.make_log_likelihood_function(
+        X_train=X_train, X_deriv=X_deriv, y_train=y_train,
+        ls=DEFAULT_LS_VAL, deriv_prior_scale=DEFAULT_DERIV_CDF_SCALE,
+        ridge_factor=5e-3)
 
     # set up state container
     initial_state = [
@@ -220,11 +208,8 @@ with mfvi_graph.as_default():
                                                     ls=DEFAULT_LS_VAL)
 
     # add penalized likelihood
-    # TODO(jereliu): move to gpr_mono
-    log_lkhd_derv = tf.reduce_mean(tfd.Normal(
-        loc=0., scale=DEFAULT_DERIV_CDF_SCALE).log_cdf(gp_f_deriv))
-    log_lkhd_rest = y.distribution.log_prob(y_train)
-    log_likelihood = log_lkhd_derv + log_lkhd_rest
+    log_likelihood = gpr_mono.make_log_likelihood_tensor(
+        gp_f_deriv, y, y_train, deriv_prior_scale=DEFAULT_DERIV_CDF_SCALE)
 
     # compute the KL divergence
     kl = 0.
@@ -238,7 +223,7 @@ with mfvi_graph.as_default():
     elbo = tf.reduce_mean(log_likelihood - kl)
 
     # define optimizer
-    optimizer = tf.train.AdamOptimizer(5e-2)
+    optimizer = tf.train.AdamOptimizer(1e-3)
     train_op = optimizer.minimize(-elbo)
 
     # define init op
@@ -321,15 +306,16 @@ visual_util.gpr_1d_visual(mu_deriv, cov_deriv,
 """ 4.1. Set up the computational graph """
 sgp_graph = tf.Graph()
 X_induce = np.expand_dims(np.linspace(np.min(X_train),
-                                      np.max(X_train), 10), 1).astype(np.float32)
+                                      np.max(X_train), 15), 1).astype(np.float32)
 
 with sgp_graph.as_default():
     # sample from variational family
     (q_f, q_f_deriv, q_sig,
      qf_mean, qf_vcov,
-     qf_deriv_mean, qf_deriv_sdev) = gpr_mono.variational_sgpr(X=X_train,
+     qf_deriv_mean, qf_deriv_vcov) = gpr_mono.variational_sgpr(X=X_train,
                                                                Z=X_induce,
                                                                X_deriv=X_deriv,
+                                                               Z_deriv=X_deriv,
                                                                ls=DEFAULT_LS_VAL)
 
     # compute the expected predictive log-likelihood
@@ -342,11 +328,8 @@ with sgp_graph.as_default():
                                                     ls=DEFAULT_LS_VAL)
 
     # add penalized likelihood
-    # TODO(jereliu): move to gpr_mono
-    log_lkhd_derv = tf.reduce_mean(tfd.Normal(
-        loc=0., scale=DEFAULT_DERIV_CDF_SCALE).log_cdf(gp_f_deriv))
-    log_lkhd_rest = y.distribution.log_prob(y_train)
-    log_likelihood = log_lkhd_derv + log_lkhd_rest
+    log_likelihood = gpr_mono.make_log_likelihood_tensor(
+        gp_f_deriv, y, y_train, deriv_prior_scale=DEFAULT_DERIV_CDF_SCALE)
 
     # compute the KL divergence
     kl = 0.
@@ -360,7 +343,7 @@ with sgp_graph.as_default():
     elbo = tf.reduce_mean(log_likelihood - kl)
 
     # define optimizer
-    optimizer = tf.train.AdamOptimizer(1e-2)
+    optimizer = tf.train.AdamOptimizer(1e-3)
     train_op = optimizer.minimize(-elbo)
 
     # define init op
@@ -383,8 +366,8 @@ with tf.Session(graph=sgp_graph) as sess:
             print("Step: {:>3d} Loss: {:.3f} ({:.3f} sec)".format(
                 step, elbo_value, duration))
     (qf_mean_val, qf_vcov_val,
-     qf_deriv_mean_val, qf_deriv_sdev_val) = sess.run([
-        qf_mean, qf_vcov, qf_deriv_mean, qf_deriv_sdev])
+     qf_deriv_mean_val, qf_deriv_vcov_val) = sess.run([
+        qf_mean, qf_vcov, qf_deriv_mean, qf_deriv_vcov])
 
     sess.close()
 
@@ -394,9 +377,9 @@ with tf.Session() as sess:
     f_samples = gpr_mono.variational_sgpr_sample(n_sample=5000,
                                                  qf_mean=qf_mean_val,
                                                  qf_cov=qf_vcov_val)
-    f_deriv_samples = gpr_mono.variational_mfvi_sample(n_sample=5000,
+    f_deriv_samples = gpr_mono.variational_sgpr_sample(n_sample=5000,
                                                        qf_mean=qf_deriv_mean_val,
-                                                       qf_sdev=qf_deriv_sdev_val)
+                                                       qf_cov=qf_deriv_vcov_val)
     f_samples_val, f_deriv_samples_val = sess.run([f_samples,
                                                    f_deriv_samples])
     sess.close()

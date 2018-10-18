@@ -19,6 +19,59 @@ def make_value_setter(**model_kwargs):
     return set_values
 
 
+def make_sparse_gp_parameters(m, S,
+                              X, Z, ls, kern_func,
+                              ridge_factor=1e-3,
+                              mean_name='qf_mean', compute_mean=True):
+    """Produces variational parameters for sparse GP approximation.
+
+    Args:
+        m: (tf.Tensor or None) Variational parameter for mean of latent GP, shape (Nz, )
+            Can be None if compute_mean=False
+        S: (tf.Tensor) Variational parameter for covariance of latent GP, shape (Nz, Nz)
+        X: (np.ndarray of float32) input training features, with dimension (Nx, D).
+        Z: (np.ndarray of float32) inducing points, with dimension (Nz, D).
+        ls: (float32) length scale parameter.
+        kern_func: (function) kernel function.
+        ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition
+        mean_name: (str) name for the mean parameter
+        compute_mean: (bool) If False, mean variational parameter is not computed.
+            In this case, its ok to have m=None
+
+    Returns:
+        Mu (tf.Tensor or none) Mean parameters for sparse Gaussian Process, shape (Nx, ).
+            if compute_mean=False, then Mu is None.
+        Sigma (tf.Tensor) Covariance parameters for sparse Gaussian Process, shape (Nx, Nx).
+    """
+    Nx, Nz = X.shape[0], Z.shape[0]
+
+    # compute matrix constants
+    Kxx = kern_func(X, ls=ls)
+    Kxz = kern_func(X, Z, ls=ls)
+    Kzz = kern_func(Z, ls=ls, ridge_factor=ridge_factor)
+
+    # compute null covariance matrix using Cholesky decomposition
+    Kzz_chol_inv = tf.matrix_inverse(tf.cholesky(Kzz))
+    Kzz_inv = tf.matmul(Kzz_chol_inv, Kzz_chol_inv, transpose_a=True)
+
+    Kxz_Kzz_chol_inv = tf.matmul(Kxz, Kzz_chol_inv, transpose_b=True)
+    Kxz_Kzz_inv = tf.matmul(Kxz, Kzz_inv)
+    Sigma_pre = Kxx - tf.matmul(Kxz_Kzz_chol_inv, Kxz_Kzz_chol_inv, transpose_b=True)
+
+    # compute sparse gp variational parameter (i.e. mean and covariance of P(f_obs | f_latent))
+    Sigma = (Sigma_pre +
+             tf.matmul(Kxz_Kzz_inv,
+                       tf.matmul(S, Kxz_Kzz_inv, transpose_b=True)) +
+             ridge_factor * tf.eye(Nx))
+
+    if compute_mean:
+        Mu = tf.tensordot(Kxz_Kzz_inv, m, [[1], [0]], name=mean_name)
+    else:
+        Mu = None
+
+    return Mu, Sigma
+
+
 def scalar_gaussian_variational(name, mean=None, sdev=None):
     """
     Creates a scalar Gaussian random variable for variational approximation.

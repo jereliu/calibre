@@ -41,6 +41,7 @@ import calibre.model.gaussian_process as gp
 import calibre.model.gp_regression as gpr
 
 import calibre.util.matrix as matrix_util
+import calibre.util.inference as inference_util
 
 from tensorflow.python.ops.distributions.util import fill_triangular
 
@@ -233,6 +234,95 @@ def model(X, X_deriv=None, ls=1., ridge_factor=1e-3):
                                   name="y")
 
     return gp_f, gp_f_deriv, sigma, y, ls
+
+
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+""" Model likelihood function for MCMC and VI """
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+
+def make_log_likelihood_function(X_train, X_deriv, y_train, ls=None,
+                                 ridge_factor=5e-3, deriv_prior_scale=1e-3):
+    """Makes log joint likelihood function for monotonic GP regression.
+
+    To be used for MCMC sampling.
+
+    Args:
+        X_train: (tf.Tensor) Training samples, shape (N_obs, D)
+        X_deriv: (tf.Tensor) Locations of derivative constraints,
+            shape (N_deriv, D)
+        y_train: (tf.Tensor) Training labels, shape (N_obs, )
+        ls: (tf.Tensor or None) Value of length scale parameter,
+            if None then will be added to the likelihood function.
+        ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
+        deriv_prior_scale: (float32) Value for Prior scale parameter for
+            probit likelihood function imposing positivity contraint on
+            f_deriv. For detail, see [1].
+
+    Returns:
+        (function) A log-joint probability function.
+            Its inputs are `model`'s parameters, and output the model's
+            un-normalized log likelihood (a scalar tf.Tensor).
+
+    """
+    model_var_names = ["gp_f", "gp_f_deriv", "sigma"]
+
+    if not ls:
+        model_var_names += ["ls"]
+
+    log_joint = ed.make_log_joint_fn(model)
+
+    def target_log_prob_fn(*model_var_positional_args):
+        """Unnormalized target density as a function of states."""
+
+        # prepare positional arguments,
+        # specifically, add back ls if its not a model parameter.
+        model_var_kwargs = dict(zip(model_var_names,
+                                    model_var_positional_args))
+
+        if "ls" not in model_var_kwargs.keys():
+            model_var_kwargs["ls"] = ls
+
+        # the probit likelihood on derivative
+        log_lkhd_deriv = tfd.Normal(
+            loc=0., scale=deriv_prior_scale).log_cdf(
+            model_var_kwargs["gp_f_deriv"])
+
+        log_joint_rest = log_joint(
+            X=X_train, X_deriv=X_deriv, y=y_train,
+            ridge_factor=ridge_factor,
+            **model_var_kwargs)
+        return tf.reduce_mean(log_lkhd_deriv) + log_joint_rest
+
+    return target_log_prob_fn
+
+
+def make_log_likelihood_tensor(gp_f_deriv, y, y_train,
+                               deriv_prior_scale=1e-3):
+    """Makes log joint likelihood tensor for monotonic GP regression.
+
+    To be used for Variational Inference.
+
+    Args:
+        gp_f_deriv: (ed.RandomVariable) RV from Monotonic GP prob program
+            corresponding to function derivative.
+        y: (ed.RandomVariable) RV from Monotonic GP prob program
+            corresponding to observed label.
+        y_train: (np.ndarray) Training labels corresponding to y
+        deriv_prior_scale: (float32) Value for Prior scale parameter for
+            probit likelihood function imposing positivity contraint on
+            f_deriv. For detail, see [1].
+
+    Returns:
+        (tf.Tensor) A scalar tf.Tensor corresponding to model likelihood,
+            with dtype float32
+    """
+    # probit likelihood for derivative constraint
+    log_lkhd_derv = tfd.Normal(loc=0.,
+                               scale=deriv_prior_scale).log_cdf(gp_f_deriv)
+    # likelihood for the rest of the model parameters
+    log_lkhd_rest = y.distribution.log_prob(y_train)
+    return tf.reduce_mean(log_lkhd_derv) + log_lkhd_rest
 
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -436,23 +526,26 @@ Consequently, U can be marginalized out, such that q(F) becomes
 """
 
 
-def variational_sgpr(X, Z, X_deriv=None, ls=1.,
+def variational_sgpr(X, Z, ls,
+                     X_deriv=None, Z_deriv=None,
                      kern_func=gp.rbf,
                      grad_func=rbf_grad_1d,
                      hess_func=rbf_hess_1d,
                      ridge_factor=1e-3):
     """Defines the mean-field variational family for GPR.
 
-    f_deriv: mean-field approximation
+    f_deriv: Both Mu and Cov approximated using sparse GP
     f: Mu is approximated using conditional mean wrt f_deriv,
-        Cov is approximated using sparse GP.
+       Cov is approximated using sparse GP.
 
     Args:
         X: (np.ndarray of float32) input training features, with dimension (Nx, D).
         Z: (np.ndarray of float32) inducing points, with dimension (Nz, D).
-        X_deriv: (tf.Tensor or None) Feature location to place derivative
-            constraint on shape (N_deriv, D). If None, X_deriv=X
         ls: (float32) length scale parameter.
+        X_deriv: (np.ndarray of float32) Feature location to place derivative
+            constraint on shape (N_deriv, D). If None, X_deriv=X.
+        Z_deriv: (np.ndarray of float32) inducing points, with dimension (Nz, D).
+            If None, then Z_deriv=Z.
         kern_func: (function) kernel function.
         grad_func: (function) Gradient kernel function for kernel_func
         hess_func: (function) Hessian kernel function for kernel_func
@@ -461,76 +554,74 @@ def variational_sgpr(X, Z, X_deriv=None, ls=1.,
     Returns:
         q_f, q_f_deriv, q_sig:
             (ed.RandomVariable) variational family.
-        q_f_mean, q_f_sdev, qf_deriv_mean, qf_deriv_sdev:
-            (tf.Variable) variational parameters for q_f
+        Mu_f, Sigma_f, Mu_df, Sigma_df:
+            (tf.Variable) variational parameters for q_f and q_f_deriv
             
     Raises:
         (ValueError) If Feature dimension of X / X_deriv / Z are not same.
     """
+    if X_deriv is None:
+        X_deriv = X
+    if Z_deriv is None:
+        Z_deriv = Z
+
     Nx, D = X.shape
     Nd, Dd = X_deriv.shape
-    Nz, Dz = Z.shape
+    Nxz, Dxz = Z.shape
+    Ndz, Ddz = Z_deriv.shape
 
-    if D != Dd or D != Dz:
-        raise ValueError("Feature dimension of X, X_deriv, Z must be same!")
+    if np.any([D != Dd, D != Dxz, D != Ddz]):
+        raise ValueError("Feature dimension of Z, X_deriv, Z_deriv "
+                         "must be same as X!")
 
-    # 1. Prepare constants
-    # compute matrix constants
-    dK = grad_func(X_deriv, X, ls=ls)
-    ddK = hess_func(X_deriv, ls=ls, ridge_factor=ridge_factor)
-    ddK_inv = tf.matrix_inverse(ddK)
-
-    Kxx = kern_func(X, ls=ls)
-    Kxz = kern_func(X, Z, ls=ls)
-    Kzz = kern_func(Z, ls=ls, ridge_factor=ridge_factor)
-
-    # compute null covariance matrix using Cholesky decomposition
-    Kzz_chol_inv = tf.matrix_inverse(tf.cholesky(Kzz))
-    Kzz_inv = tf.matmul(Kzz_chol_inv, Kzz_chol_inv, transpose_a=True)
-
-    Kxz_Kzz_chol_inv = tf.matmul(Kxz, Kzz_chol_inv, transpose_b=True)
-    Kxz_Kzz_inv = tf.matmul(Kxz, Kzz_inv)
-    Sigma_pre = Kxx - tf.matmul(Kxz_Kzz_chol_inv, Kxz_Kzz_chol_inv, transpose_b=True)
-
-    # 2. Define variational parameters
+    # 1. Define variational parameters
     # define mean and variance for sigma
     q_sig_mean = tf.get_variable(shape=[], name='q_sig_mean')
     q_sig_sdev = tf.exp(tf.get_variable(shape=[], name='q_sig_sdev'))
 
-    # define free parameters (i.e. mean and full covariance of f_latent)
-    s = tf.get_variable(shape=[Nz * (Nz + 1) / 2],
-                        # initializer=tf.zeros_initializer(),
-                        name='qf_s')
-    L = fill_triangular(s, name='qf_chol')
-    S = tf.matmul(L, L, transpose_b=True)
+    # define mean and cov for latent gp_deriv
+    m_df = tf.get_variable(shape=[Ndz], name='qf_deriv_m')
 
-    # compute sparse gp variational parameter (i.e. mean and covariance of P(f_obs | f_latent))
-    # define variational parameters
-    qf_deriv_mean = tf.get_variable(shape=[Nd], name='qf_deriv_mean')
-    qf_deriv_sdev = tf.exp(tf.get_variable(shape=[Nd], name='qf_deriv_sdev'))
+    s_df = tf.get_variable(shape=[Ndz * (Ndz + 1) / 2], name='qf_deriv_s')
+    L_df = fill_triangular(s_df, name='qf_deriv_chol')
+    S_df = tf.matmul(L_df, L_df, transpose_b=True)
 
-    qf_mean = tf.squeeze(tf.matmul(
-        dK, tf.matmul(ddK_inv, tf.expand_dims(qf_deriv_mean, -1)),
+    # define cov for latent gp_deriv
+    s_f = tf.get_variable(shape=[Nxz * (Nxz + 1) / 2], name='qf_s')
+    L_f = fill_triangular(s_f, name='qf_chol')
+    S_f = tf.matmul(L_f, L_f, transpose_b=True)
+
+    # 2. Define sparse GP parameters
+    # parameters for observed f_deriv
+    Mu_df, Sigma_df = inference_util.make_sparse_gp_parameters(
+        m_df, S_df, X_deriv, Z_deriv, ls=ls,
+        kern_func=hess_func,
+        mean_name='qf_deriv_mean')
+
+    # parameters for observed f
+    dK = grad_func(X_deriv, X, ls=ls)
+    ddK = hess_func(X_deriv, ls=ls, ridge_factor=ridge_factor)
+    ddK_inv = tf.matrix_inverse(ddK)
+
+    Mu_f = tf.squeeze(tf.matmul(
+        dK, tf.matmul(ddK_inv, tf.expand_dims(Mu_df, -1)),
         transpose_a=True, name='qf_mean'))
-    qf_cov = (Sigma_pre +
-              tf.matmul(Kxz_Kzz_inv,
-                        tf.matmul(S, Kxz_Kzz_inv, transpose_b=True)) +
-              ridge_factor * tf.eye(Nx)
-              )
+    _, Sigma_f = inference_util.make_sparse_gp_parameters(
+        None, S_f, X, Z, ls=ls,
+        kern_func=gp.rbf, compute_mean=False)
 
-    # define variational family
-    q_f = ed.MultivariateNormalFullCovariance(loc=qf_mean,
-                                              covariance_matrix=qf_cov,
+    # 3. Define variational family
+    q_f = ed.MultivariateNormalFullCovariance(loc=Mu_f,
+                                              covariance_matrix=Sigma_f,
                                               name='q_f')
-    q_f_deriv = ed.MultivariateNormalDiag(loc=qf_deriv_mean,
-                                          scale_diag=qf_deriv_sdev,
-                                          name='q_f_deriv')
+    q_f_deriv = ed.MultivariateNormalFullCovariance(loc=Mu_df,
+                                                    covariance_matrix=Sigma_df,
+                                                    name='q_f_deriv')
     q_sig = ed.Normal(loc=q_sig_mean,
                       scale=q_sig_sdev, name='q_sig')
 
     return (q_f, q_f_deriv, q_sig,
-            qf_mean, qf_cov,
-            qf_deriv_mean, qf_deriv_sdev)
+            Mu_f, Sigma_f, Mu_df, Sigma_df)
 
 
 variational_sgpr_sample = gpr.variational_sgpr_sample
