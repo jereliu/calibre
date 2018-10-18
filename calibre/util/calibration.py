@@ -202,3 +202,30 @@ def build_calibration_dataset(Y_obs, Y_sample):
                 tf.expand_dims(F_obs, 0), dtype=tf.float32), axis=0)
 
     return {"label": P_obs, "feature": F_obs}
+
+
+def sample_ecdf(n_sample, base_sample, quantile, seed=None):
+    """Sample observations form 1D empirical cdf using inverse CDF method.
+
+    Here empirical cdf is defined by base_sample and the
+        corresponding quantiles.
+
+    Args:
+        n_sample: (int) Number of samples.
+        base_sample: (np.ndarray of float32) Base samples to sample
+            from, shape (n_sample0, )
+        quantile: (np.ndarray of float32) Quantiles corresponding to
+            the base samples.
+
+    Returns:
+        (np.ndarray of float32) Sample of shape (n_sample,) corresponding
+            to the empirical cdf.
+    """
+    base_sample = np.sort(base_sample.squeeze())
+
+    # identify sample id using inverse CDF lookup
+    np.random.seed(seed)
+    sample_prob = np.random.sample(size=n_sample)
+    sample_id = np.sum(np.expand_dims(sample_prob, 0) >
+                       np.expand_dims(quantile, 1), axis=0) - 1
+    return base_sample[sample_id]

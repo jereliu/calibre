@@ -1342,9 +1342,11 @@ for target_function in data_util.FUNC_LIST_2D:
         #                                            save_addr_prefix=os.path.join(
         #                                                _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
 
+
 """""""""""""""""""""""""""""""""
-# 5. Nonparametric Calibration
+# 5. Nonparametric Calibration I: Isotonic Regression
 """""""""""""""""""""""""""""""""
+
 # TODO(jereliu): to complete after 1D example
 
 # load hyper-parameters
@@ -1396,3 +1398,5 @@ y_sample_calib = ensemble_sample_val[:, calib_sample_id].T
 
 calib_data = calib_util.build_calibration_dataset(
     Y_obs=y_calib, Y_sample=y_sample_calib)
+
+

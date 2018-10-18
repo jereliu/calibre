@@ -19,6 +19,7 @@ from tensorflow_probability import edward2 as ed
 
 from calibre.model import gaussian_process as gp
 from calibre.model import tailfree_process as tail_free
+from calibre.model import gp_regression_monotone as gpr_mono
 from calibre.model import adaptive_ensemble
 
 from calibre.calibration import score
@@ -153,7 +154,7 @@ K = len(base_test_pred)
 
 family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 
-num_results = 5000
+num_results = 1000
 num_burnin_steps = 5000
 
 # define mcmc computation graph
@@ -582,7 +583,7 @@ X_induce = np.expand_dims(np.linspace(np.min(X_test),
 family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 
 n_inference_sample = 100
-n_final_sample = 10000  # number of samples to collect from variational family
+n_final_sample = 1000  # number of samples to collect from variational family
 max_steps = 20000  # number of training iterations
 
 for family_name in ["mfvi", "sgpr"]:
@@ -1011,7 +1012,7 @@ X_induce = np.expand_dims(np.linspace(np.min(X_test),
 family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 
 n_inference_sample = 1000  # number of samples to collect from variational family for approx inference
-n_final_sample = 10000  # number of samples to collect from variational family for final summary
+n_final_sample = 1000  # number of samples to collect from variational family for final summary
 max_steps = 20000  # number of training iterations
 
 for family_name in ["mfvi_aug", "sgpr_aug"]:
@@ -1880,53 +1881,29 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                                                    _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
 
 """""""""""""""""""""""""""""""""
-# 6. Nonparametric Calibration
+# 6. Nonparametric Calibration I: Isotonic Regression
 """""""""""""""""""""""""""""""""
-
-
-# helper function
-def sample_ecdf(n_sample, base_sample, quantile, seed=None):
-    """Sample observations form 1D empirical cdf using inverse CDF method.
-
-    Here empirical cdf is defined by base_sample and the
-        corresponding quantiles.
-
-    Args:
-        n_sample: (int) Number of samples.
-        base_sample: (np.ndarray of float32) Base samples to sample
-            from, shape (n_sample0, )
-        quantile: (np.ndarray of float32) Quantiles corresponding to
-            the base samples.
-
-    Returns:
-        (np.ndarray of float32) Sample of shape (n_sample,) corresponding
-            to the empirical cdf.
-    """
-    base_sample = np.sort(base_sample.squeeze())
-
-    # identify sample id using inverse CDF lookup
-    np.random.seed(seed)
-    sample_prob = np.random.sample(size=n_sample)
-    sample_id = np.sum(np.expand_dims(sample_prob, 0) >
-                       np.expand_dims(quantile, 1), axis=0) - 1
-    return base_sample[sample_id]
-
 
 """ 6.1. prepare hyperparameters"""
 
 # load hyper-parameters
-family_name = "hmc"
+family_name = "sgpr"
+family_name_full = {"hmc": "Hamilton MC",
+                    "mfvi": "Mean-field VI",
+                    "sgpr": "Sparse Gaussian Process"}[family_name]
+
 os.makedirs("{}/{}".format(_SAVE_ADDR_PREFIX, family_name), exist_ok=True)
+
 
 # load estimates
 with open(os.path.join(_SAVE_ADDR_PREFIX,
                        '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'rb') as file:
     ensemble_sample_val = pk.load(file)
 
-""" 6.2. build calibration dataset and fit isotonic regression"""
+""" 6.2. build calibration dataset"""
 sample_size = ensemble_sample_val.shape[0]
 calib_train_id = np.random.choice(
-    calib_sample_id, int(calib_sample_id.size/2))
+    calib_sample_id, int(calib_sample_id.size / 2))
 calib_test_id = np.asarray(list(set(calib_sample_id) -
                                 set(calib_train_id)))
 
@@ -1940,8 +1917,10 @@ with tf.Session() as sess:
     orig_prob, calib_prob = sess.run(
         [calib_data["feature"], calib_data["label"]])
 
-plt.plot([[0., 0.], [1., 1.]])
-sns.regplot(orig_prob, calib_prob, fit_reg=False)
+# plt.plot([[0., 0.], [1., 1.]])
+# sns.regplot(orig_prob, calib_prob, fit_reg=False)
+
+""" 6.3. fit isotonic regression"""
 
 # fit isotonic regression
 ir = IsotonicRegression(y_min=0, y_max=1, out_of_bounds='clip')
@@ -1959,14 +1938,14 @@ calib_prob_pred = ir.predict(orig_prob_pred)
 #             scatter_kws={'color': 'red'})
 # plt.show()
 
-""" 6.3. produce calibrated posterior sample"""
+""" 6.4. produce calibrated posterior sample"""
 # specifically, for samples corresponding to each observation,
 # produce a empirical cdf in the form of quantiles.
 
 ensemble_sample_calib_val = [
-    sample_ecdf(n_sample=1000,
-                base_sample=base_sample,
-                quantile=calib_prob_pred) for
+    calib_util.sample_ecdf(n_sample=1000,
+                           base_sample=base_sample,
+                           quantile=calib_prob_pred) for
     base_sample in ensemble_sample_val.T
 ]
 ensemble_sample_calib_val = np.asarray(ensemble_sample_calib_val).T
@@ -1978,7 +1957,7 @@ ensemble_sample_calib_val = np.asarray(ensemble_sample_calib_val).T
 # plt.plot(np.sort(ensemble_sample_val[:, sample_id]),
 #          calib_prob_pred)
 
-""" 6.4.1. visualize: ensemble posterior reliability """
+""" 6.5.1. visualize: ensemble posterior reliability """
 os.makedirs(os.path.join(_SAVE_ADDR_PREFIX,
                          "{}/calibration/".format(family_name)),
             exist_ok=True)
@@ -1999,7 +1978,7 @@ visual_util.gpr_1d_visual(posterior_dist_mu,
                           X_test=X_valid, y_test=y_valid,
                           title="Ensemble Posterior Predictive, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "{}/calibration/ensemble_posterior_full.png".format(family_name))
+                                                 "{}/calibration/ensemble_posterior_full_isoreg.png".format(family_name))
                           )
 
 visual_util.gpr_1d_visual(posterior_dist_median,
@@ -2009,7 +1988,8 @@ visual_util.gpr_1d_visual(posterior_dist_median,
                           X_test=X_valid, y_test=y_valid,
                           title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "{}/calibration/ensemble_posterior_full_quantile.png".format(family_name))
+                                                 "{}/calibration/ensemble_posterior_full_quantile_isoreg.png".format(
+                                                     family_name))
                           )
 visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
                           pred_samples=list(ensemble_sample_calib_val)[:150],
@@ -2017,18 +1997,19 @@ visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
                           X_test=X_valid, y_test=y_valid,
                           title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "{}/calibration/ensemble_posterior_full_sample.png".format(family_name))
+                                                 "{}/calibration/ensemble_posterior_full_sample_isoreg.png".format(
+                                                     family_name))
                           )
 
-""" 6.4.2. visualize: ensemble posterior reliability """
+""" 6.5.2. visualize: ensemble posterior reliability """
 y_calib = y_valid[calib_test_id]
 y_sample_calib = ensemble_sample_calib_val[:, calib_test_id].T
 
 visual_util.prob_calibration_1d(
     y_calib, y_sample_calib,
-    title="Ensemble, {}".format(family_name_full),
+    title="Ensemble, Test, {}".format(family_name_full),
     save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                           "{}/calibration/ensemble_calibration_prob_test.png".format(family_name)))
+                           "{}/calibration/isoreg_calibration_prob_test.png".format(family_name)))
 
 # overall
 y_calib = y_valid[calib_sample_id]
@@ -2038,4 +2019,300 @@ visual_util.prob_calibration_1d(
     y_calib, y_sample_calib,
     title="Ensemble, {}".format(family_name_full),
     save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                           "{}/calibration/ensemble_calibration_prob.png".format(family_name)))
+                           "{}/calibration/isoreg_calibration_prob.png".format(family_name)))
+
+"""""""""""""""""""""""""""""""""
+# 7. Nonparametric Calibration II: Monotonic GP
+"""""""""""""""""""""""""""""""""
+# TODO(jereliu): separate ls for main gp and derivative gp
+# TODO(jereliu): Urgent: enable sampling for predictive
+
+ADD_CONSTRAINT_POINT = True
+
+""" 7.1. prepare hyperparameters """
+
+# load hyper-parameters
+family_name = "sgpr"
+family_name_full = {"hmc": "Hamilton MC",
+                    "mfvi": "Mean-field VI",
+                    "sgpr": "Sparse Gaussian Process"}[family_name]
+
+os.makedirs("{}/{}".format(_SAVE_ADDR_PREFIX, family_name), exist_ok=True)
+
+# load estimates
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'rb') as file:
+    ensemble_sample_val = pk.load(file)
+
+""" 7.2. build calibration dataset """
+sample_size = ensemble_sample_val.shape[0]
+calib_train_id = np.random.choice(
+    calib_sample_id, int(calib_sample_id.size / 2))
+calib_test_id = np.asarray(list(set(calib_sample_id) -
+                                set(calib_train_id)))
+
+y_calib_train = y_valid[calib_train_id]
+y_calib_test = y_valid[calib_test_id]
+y_calib_sample_train = ensemble_sample_val[:, calib_train_id].T
+y_calib_sample_test = ensemble_sample_val[:, calib_test_id].T
+
+calib_data_train = calib_util.build_calibration_dataset(Y_obs=y_calib_train,
+                                                        Y_sample=y_calib_sample_train)
+calib_data_test = calib_util.build_calibration_dataset(Y_obs=y_calib_test,
+                                                       Y_sample=y_calib_sample_test)
+
+with tf.Session() as sess:
+    (orig_prob_train, calib_prob_train,
+     orig_prob_test, calib_prob_test) = sess.run(
+        [calib_data_train["feature"], calib_data_train["label"],
+         calib_data_test["feature"], calib_data_test["label"]])
+
+# plt.plot([[0., 0.], [1., 1.]])
+# sns.regplot(orig_prob_train, calib_prob_train, fit_reg=False)
+
+if ADD_CONSTRAINT_POINT:
+    # add constraint points at [0,0] and [1,1]
+    orig_prob_train = np.concatenate([orig_prob_train,
+                                      [0., 1.]]).astype(np.float32)
+    calib_prob_train = np.concatenate([calib_prob_train,
+                                       [0., 1.]]).astype(np.float32)
+
+# prepare data
+N = orig_prob_train.size
+N_deriv = 100
+
+orig_prob_pred = np.linspace(0, 1, num=sample_size).astype(np.float32)
+orig_prob_derv = np.linspace(0, 1, num=N_deriv).astype(np.float32)
+
+orig_prob_train = np.atleast_2d(orig_prob_train).T
+orig_prob_derv = np.atleast_2d(orig_prob_derv).T
+calib_prob_train = calib_prob_train
+orig_prob_pred = np.atleast_2d(orig_prob_pred).T
+
+""" 7.3. fit monotonic GP"""
+# default parameters and data
+DEFAULT_LS_CALIB_VAL = 0.2
+DEFAULT_DERIV_CDF_SCALE = 1e-3
+
+""" 7.3.1. define mcmc computation graph"""
+num_results = 5000
+num_burnin_steps = 5000
+
+mcmc_graph = tf.Graph()
+with mcmc_graph.as_default():
+    # build likelihood by explicitly
+    target_log_prob_fn = gpr_mono.make_log_likelihood_function(
+        X_train=orig_prob_train,
+        X_deriv=orig_prob_derv,
+        y_train=calib_prob_train,
+        ls=DEFAULT_LS_CALIB_VAL,
+        deriv_prior_scale=DEFAULT_DERIV_CDF_SCALE,
+        ridge_factor=9e-3,
+        cdf_constraint=True
+    )
+
+    # set up state container
+    initial_state = [
+        tf.random_normal([N], stddev=0.01, name='init_gp_func'),
+        tf.random_normal([N_deriv], stddev=0.01, name='init_gp_derv'),
+        tf.constant(0.1, name='init_sigma'),
+    ]
+
+    # set up HMC transition kernel
+    step_size = tf.get_variable(
+        name='step_size',
+        initializer=1.,
+        use_resource=True,  # For TFE compatibility.
+        trainable=False)
+
+    hmc = tfp.mcmc.HamiltonianMonteCarlo(
+        target_log_prob_fn=target_log_prob_fn,
+        num_leapfrog_steps=3,
+        step_size=step_size,
+        step_size_update_fn=tfp.mcmc.make_simple_step_size_update_policy())
+
+    # set up main sampler
+    state, kernel_results = tfp.mcmc.sample_chain(
+        num_results=num_results,
+        num_burnin_steps=num_burnin_steps,
+        current_state=initial_state,
+        kernel=hmc,
+        parallel_iterations=10
+    )
+
+    gpf_sample, gpf_deriv_sample, sigma_sample, = state
+
+    # set up init op
+    init_op = tf.global_variables_initializer()
+
+    mcmc_graph.finalize()
+
+""" 7.3.2. execute sampling"""
+with tf.Session(graph=mcmc_graph) as sess:
+    init_op.run()
+    [
+        f_samples_val,
+        f_deriv_samples_val,
+        sigma_sample_val,
+        is_accepted_,
+    ] = sess.run(
+        [
+            gpf_sample,
+            gpf_deriv_sample,
+            sigma_sample,
+            kernel_results.is_accepted,
+        ])
+    print('Acceptance Rate: {}'.format(np.mean(is_accepted_)))
+    sess.close()
+
+""" 7.3.3. prediction and visualization"""
+# prediction
+df_pred_val = gp.sample_posterior_full(X_new=orig_prob_pred,
+                                       X=orig_prob_derv,
+                                       f_sample=f_deriv_samples_val.T,
+                                       ls=DEFAULT_LS_CALIB_VAL,
+                                       kernel_func=gpr_mono.rbf_hess_1d)
+# sample f conditional on f_deriv
+calib_prob_pred_val = (
+    gpr_mono.sample_posterior_predictive(X_new=orig_prob_pred,
+                                         X_obs=orig_prob_train,
+                                         X_deriv=orig_prob_derv,
+                                         f_sample=f_samples_val.T,
+                                         f_deriv_sample=f_deriv_samples_val.T,
+                                         kernel_func_ff=gp.rbf,
+                                         kernel_func_df=gpr_mono.rbf_grad_1d,
+                                         kernel_func_dd=gpr_mono.rbf_hess_1d,
+                                         ls=DEFAULT_LS_CALIB_VAL, )
+)
+
+
+# plt.plot([[0., 0.], [1., 1.]])
+# sns.regplot(orig_prob_train.squeeze(), calib_prob_train,
+#             fit_reg=False, scatter_kws={'color': 'green'})
+#
+# sns.regplot(orig_prob_pred.squeeze(), np.mean(calib_prob_pred, -1),
+#             fit_reg=False, marker='+',
+#             scatter_kws={'color': 'red'})
+# plt.show()
+
+mu = np.mean(calib_prob_pred_val, axis=1)
+mu_deriv = np.mean(df_pred_val, axis=1)
+cov = np.var(calib_prob_pred_val, axis=1)
+cov_deriv = np.var(df_pred_val, axis=1)
+
+visual_util.gpr_1d_visual(mu, cov,
+                          X_train=orig_prob_train,
+                          y_train=calib_prob_train,
+                          X_test=orig_prob_pred,
+                          y_test=None,
+                          title="RBF Calibration Fit, Hamilton MC",
+                          save_addr=os.path.join(
+                              _SAVE_ADDR_PREFIX,
+                              "{}/calibration/gpr_calib_fit.png".format(family_name)),
+                          y_range=[-0.1, 1.1])
+
+visual_util.gpr_1d_visual(mu_deriv, cov_deriv,
+                          X_test=orig_prob_pred,
+                          title="RBF Derivative, Hamilton MC",
+                          save_addr=os.path.join(
+                              _SAVE_ADDR_PREFIX,
+                              "{}/calibration/gpr_calib_deriv.png".format(family_name)),
+                          add_reference=True, y_range=None)
+
+visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                          pred_samples=list(calib_prob_pred_val.T)[:500],
+                          X_train=orig_prob_train,
+                          y_train=calib_prob_train,
+                          X_test=orig_prob_pred,
+                          y_test=None,
+                          title="RBF Calibration Samples, {}".format(family_name_full),
+                          save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                 "{}/calibration/gpr_calib_sample.png".format(
+                                                     family_name)),
+                          y_range=[-0.1, 1.1])
+
+""" 7.4. produce calibrated posterior sample"""
+# specifically, for samples corresponding to each observation,
+# produce a empirical cdf in the form of quantiles.
+calib_prob_pred = np.mean(calib_prob_pred_val, axis=1)
+calib_prob_pred[calib_prob_pred > 1.] = 1.
+calib_prob_pred[calib_prob_pred < 0.] = 0.
+
+ensemble_sample_calib_val = [
+    calib_util.sample_ecdf(n_sample=1000,
+                           base_sample=base_sample,
+                           quantile=calib_prob_pred) for
+    base_sample in ensemble_sample_val.T
+]
+ensemble_sample_calib_val = np.asarray(ensemble_sample_calib_val).T
+
+# # plot original vs calibrated cdf
+# sample_id = 50
+# plt.plot(np.sort(ensemble_sample_val[:, sample_id]),
+#          orig_prob_pred)
+# plt.plot(np.sort(ensemble_sample_val[:, sample_id]),
+#          calib_prob_pred)
+
+""" 7.5.1. visualize: ensemble posterior reliability """
+os.makedirs(os.path.join(_SAVE_ADDR_PREFIX,
+                         "{}/calibration/".format(family_name)),
+            exist_ok=True)
+
+posterior_dist_mu = np.nanmean(ensemble_sample_calib_val, axis=0)
+posterior_dist_cov = np.nanvar(ensemble_sample_calib_val, axis=0)
+
+posterior_dist_median = np.nanmedian(ensemble_sample_calib_val, axis=0)
+posterior_dist_quantiles = [
+    np.percentile(ensemble_sample_calib_val,
+                  [100 - (100 - q) / 2, (100 - q) / 2], axis=0)
+    for q in [68, 95, 99]
+]
+
+visual_util.gpr_1d_visual(posterior_dist_mu,
+                          pred_cov=posterior_dist_cov,
+                          X_train=X_test, y_train=y_test,
+                          X_test=X_valid, y_test=y_valid,
+                          title="Ensemble Posterior Predictive, {}".format(family_name_full),
+                          save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                 "{}/calibration/ensemble_posterior_full_gpr.png".format(family_name))
+                          )
+
+visual_util.gpr_1d_visual(posterior_dist_median,
+                          pred_cov=None,
+                          pred_quantiles=posterior_dist_quantiles,
+                          X_train=X_test, y_train=y_test,
+                          X_test=X_valid, y_test=y_valid,
+                          title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
+                          save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                 "{}/calibration/ensemble_posterior_full_quantile_gpr.png".format(
+                                                     family_name))
+                          )
+visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
+                          pred_samples=list(ensemble_sample_calib_val)[:150],
+                          X_train=X_test, y_train=y_test,
+                          X_test=X_valid, y_test=y_valid,
+                          title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
+                          save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                                 "{}/calibration/ensemble_posterior_full_sample_gpr.png".format(
+                                                     family_name))
+                          )
+
+""" 7.5.2. visualize: ensemble posterior reliability """
+y_calib = y_valid[calib_test_id]
+y_sample_calib = ensemble_sample_calib_val[:, calib_test_id].T
+
+visual_util.prob_calibration_1d(
+    y_calib, y_sample_calib,
+    title="Ensemble, Test, {}".format(family_name_full),
+    save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                           "{}/calibration/gpr_calibration_prob_test.png".format(family_name)))
+
+# overall
+y_calib = y_valid[calib_sample_id]
+y_sample_calib = ensemble_sample_calib_val[:, calib_sample_id].T
+
+visual_util.prob_calibration_1d(
+    y_calib, y_sample_calib,
+    title="Ensemble, {}".format(family_name_full),
+    save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                           "{}/calibration/gpr_calibration_prob.png".format(family_name)))

@@ -87,17 +87,18 @@ def gpr_1d_visual(pred_mean,
                     color='teal', alpha=.01, linewidth=2)
 
     # plot ground truth
-    if isinstance(X_test, np.ndarray):
-        y_X_ratio = len(y_test) / len(X_test)
-        if y_X_ratio.is_integer():
-            y_X_ratio = int(y_X_ratio)
-            for fold_index in range(y_X_ratio):
-                index_start = int(fold_index * len(X_test))
-                index_end = int((fold_index + 1) * len(X_test))
-                y_test_plot = y_test.squeeze()[index_start:index_end]
-                ax.plot(X_test.squeeze(), y_test_plot, c='black')
-        else:
-            raise ValueError("y_test must be multiple of X_test.")
+    if y_test is not None:
+        if isinstance(X_test, np.ndarray):
+            y_X_ratio = len(y_test) / len(X_test)
+            if y_X_ratio.is_integer():
+                y_X_ratio = int(y_X_ratio)
+                for fold_index in range(y_X_ratio):
+                    index_start = int(fold_index * len(X_test))
+                    index_end = int((fold_index + 1) * len(X_test))
+                    y_test_plot = y_test.squeeze()[index_start:index_end]
+                    ax.plot(X_test.squeeze(), y_test_plot, c='black')
+            else:
+                raise ValueError("y_test must be multiple of X_test.")
 
     if isinstance(X_train, np.ndarray):
         ax.plot(X_train.squeeze(), y_train.squeeze(), 'o', c='red',
