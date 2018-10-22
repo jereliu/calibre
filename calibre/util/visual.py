@@ -8,6 +8,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from calibre.calibration import coverage
+
 import calibre.util.metric as metric_util
 
 
@@ -326,10 +328,45 @@ def prob_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
 
     fig, ax = plt.subplots()
     ax.plot(ecdf_eval, ecdf_eval, c="black")
-    ax.plot(ecdf_eval, ecdf_valu)
+    ax.plot(ecdf_valu, ecdf_eval)
     total_variation = np.mean(np.abs(ecdf_eval - ecdf_valu))
     plt.title("Probabilistic Calibration, {}, Score: {:.3f}".format(
         title, total_variation))
+    plt.xlabel("Observed CDF Value")
+    plt.ylabel("Expected CDF Value (Uniform(0, 1))")
+
+    if save_addr:
+        plt.savefig(save_addr)
+        plt.close()
+        plt.ion()
+
+
+def coverage_index_1d(Y_obs, Y_sample, title="", save_addr=""):
+    """Plots the reliability diagram (i.e. CDF for F^{-1}(y) ) for 1D prediction.
+
+    Args:
+        Y_obs: (np.ndarray of float32) N observations of dim (N_obs, 1)
+        Y_sample: (np.ndarray of float32) Samples of size M corresponding
+        to the N observations. dim (N_obs, N_sample)
+        title: (str) Title of the image.
+        save_addr: (str) Address to save image to.
+    """
+
+    if save_addr:
+        pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
+        plt.ioff()
+
+    exp_coverage, obs_coverage = coverage.credible_interval_coverage(
+        Y_obs, Y_sample)
+
+    fig, ax = plt.subplots()
+    ax.plot(exp_coverage, exp_coverage, c="black")
+    ax.plot(obs_coverage, exp_coverage)
+    total_variation = np.mean(np.abs(obs_coverage - exp_coverage))
+    plt.title("Credible Interval Coverage, {}, Score: {:.3f}".format(
+        title, total_variation))
+    plt.xlabel("Observed Coverage")
+    plt.ylabel("Expected Coverage")
 
     if save_addr:
         plt.savefig(save_addr)

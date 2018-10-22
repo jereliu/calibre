@@ -221,6 +221,16 @@ def sample_ecdf(n_sample, base_sample, quantile, seed=None):
         (np.ndarray of float32) Sample of shape (n_sample,) corresponding
             to the empirical cdf.
     """
+    if len(base_sample) > len(quantile):
+        base_sample = base_sample[np.random.choice(len(base_sample),
+                                                   len(quantile),
+                                                   replace=False)]
+    elif len(base_sample) < len(quantile):
+        quantile = quantile[np.random.choice(len(quantile),
+                                             len(base_sample),
+                                             replace=False)]
+        quantile = np.sort(quantile.squeeze())
+
     base_sample = np.sort(base_sample.squeeze())
 
     # identify sample id using inverse CDF lookup
