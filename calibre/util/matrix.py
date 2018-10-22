@@ -69,4 +69,3 @@ def make_block_matrix(M_00, M_01, M_11=None, ridge_factor=0.):
             return concat_mat + ridge_mat
         else:
             return tf.concat([M_00, M_01], axis=1)
-

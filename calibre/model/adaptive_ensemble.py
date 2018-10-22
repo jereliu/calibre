@@ -17,11 +17,11 @@ from calibre.util.model import sparse_softmax
 
 tfd = tfp.distributions
 
-_LS_PRIOR_MEAN = -5.
-_LS_PRIOR_SDEV = 1.
+_LS_PRIOR_MEAN = np.array(-5.).astype(np.float32)
+_LS_PRIOR_SDEV = np.array(1.).astype(np.float32)
 
-_NOISE_PRIOR_MEAN = -5.
-_NOISE_PRIOR_SDEV = 1.
+_NOISE_PRIOR_MEAN = np.array(-5.).astype(np.float32)
+_NOISE_PRIOR_SDEV = np.array(1.).astype(np.float32)
 
 
 def sparse_conditional_weight(X, base_pred, temp,

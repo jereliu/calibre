@@ -342,7 +342,7 @@ def variational_sgpr(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
     qf_cov = (Sigma_pre +
               tf.matmul(Kxz_Kzz_inv,
                         tf.matmul(S, Kxz_Kzz_inv, transpose_b=True)) +
-              ridge_factor * tf.eye(Nx)
+              ridge_factor * tf.eye(Nx, dtype=tf.float32)
               )
 
     # define variational family

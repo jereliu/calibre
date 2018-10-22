@@ -81,8 +81,9 @@ def rbf(X, X2=None, ls=1., ridge_factor=0.):
     Returns:
         (tf.Tensor) A N x N2 tensor for exp(-||x-x'||**2 / 2 * ls**2)
     """
-    if ridge_factor:
-        ridge_mat = ridge_factor * tf.eye(X.shape[0])
+    N, _ = X.shape.as_list()
+    if ridge_factor and X2 is None:
+        ridge_mat = ridge_factor * tf.eye(N, dtype=tf.float32)
     else:
         ridge_mat = 0
 
@@ -115,7 +116,7 @@ def prior(X, ls, kernel_func=rbf,
     N = X.shape[0]
     K_mat = kernel_func(X, ls=ls, ridge_factor=ridge_factor)
 
-    return ed.MultivariateNormalTriL(loc=tf.zeros(N),
+    return ed.MultivariateNormalTriL(loc=tf.zeros(N, dtype=tf.float32),
                                      scale_tril=tf.cholesky(K_mat),
                                      name=name)
 
@@ -181,8 +182,12 @@ def sample_posterior_full(X_new, X, f_sample, ls,
     Returns:
          (np.ndarray of float32) N_new x M vectors of posterior predictive mean samples
     """
-    N_new, _ = X_new.shape
-    N, M = f_sample.shape
+    X = tf.convert_to_tensor(X, dtype=tf.float32)
+    X_new = tf.convert_to_tensor(X_new, dtype=tf.float32)
+    f_sample = tf.convert_to_tensor(f_sample, dtype=tf.float32)
+
+    N_new, _ = X_new.shape.as_list()
+    N, M = f_sample.shape.as_list()
 
     if kernel_func_xn is None:
         kernel_func_xn = kernel_func
@@ -331,7 +336,7 @@ def variational_sgpr(X, Z, ls=1., kernel_func=rbf, ridge_factor=1e-3, name=""):
     qf_cov = (Sigma_pre +
               tf.matmul(Kxz_Kzz_inv,
                         tf.matmul(S, Kxz_Kzz_inv, transpose_b=True)) +
-              ridge_factor * tf.eye(Nx))
+              ridge_factor * tf.eye(Nx, dtype=tf.float32))
 
     # define variational family
     q_f = ed.MultivariateNormalFullCovariance(loc=qf_mean,
