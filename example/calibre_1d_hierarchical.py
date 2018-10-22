@@ -37,7 +37,11 @@ from calibre.util.gp_flow import DEFAULT_KERN_FUNC_DICT_GPY, DEFAULT_KERN_FUNC_D
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+# TODO(jereliu): redesign data-generation mechanism to reflect varying
+# smoothness and discontinuous
+
 # TODO(jereliu): adjust VI for ls_weight/ls_resid prior
+
 tfd = tfp.distributions
 
 _FIT_BASE_MODELS = False
@@ -160,7 +164,7 @@ num_burnin_steps = 5000
 # define mcmc computation graph
 mcmc_graph = tf.Graph()
 with mcmc_graph.as_default():
-    # build likelihood by explicitly
+    # build likelihood explicitly
     log_joint = ed.make_log_joint_fn(adaptive_ensemble.model_tailfree)
 
     # aggregate node-specific variable names
@@ -527,6 +531,12 @@ visual_util.prob_calibration_1d(
     title="Ensemble, {}".format(family_name_full),
     save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                            "{}/ensemble_calibration_prob.png".format(family_name)))
+
+visual_util.coverage_index_1d(
+    y_calib, y_sample_calib,
+    title="Ensemble, {}".format(family_name_full),
+    save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                           "{}/ensemble_credible_coverage.png".format(family_name)))
 
 """ 2.3.7. visualize: base ensemble weight with uncertainty """
 visual_util.plot_ensemble_weight_mean_1d(X=X_valid, weight_sample=ensemble_weights_val,
@@ -970,6 +980,12 @@ for family_name in ["mfvi", "sgpr"]:
         title="Ensemble, {}".format(family_name_full),
         save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                "{}/ensemble_calibration_prob.png".format(family_name)))
+
+    visual_util.coverage_index_1d(
+        y_calib, y_sample_calib,
+        title="Ensemble, {}".format(family_name_full),
+        save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                               "{}/ensemble_credible_coverage.png".format(family_name)))
 
     """ 3.5.7. visualize: base ensemble weight with uncertainty """
     visual_util.plot_ensemble_weight_mean_1d(X=X_valid, weight_sample=ensemble_weights_val,
@@ -1887,13 +1903,12 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
 """ 6.1. prepare hyperparameters"""
 
 # load hyper-parameters
-family_name = "sgpr"
+family_name = "hmc"
 family_name_full = {"hmc": "Hamilton MC",
                     "mfvi": "Mean-field VI",
                     "sgpr": "Sparse Gaussian Process"}[family_name]
 
 os.makedirs("{}/{}".format(_SAVE_ADDR_PREFIX, family_name), exist_ok=True)
-
 
 # load estimates
 with open(os.path.join(_SAVE_ADDR_PREFIX,
@@ -1978,7 +1993,8 @@ visual_util.gpr_1d_visual(posterior_dist_mu,
                           X_test=X_valid, y_test=y_valid,
                           title="Ensemble Posterior Predictive, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                                 "{}/calibration/ensemble_posterior_full_isoreg.png".format(family_name))
+                                                 "{}/calibration/ensemble_posterior_full_isoreg.png".format(
+                                                     family_name))
                           )
 
 visual_util.gpr_1d_visual(posterior_dist_median,
@@ -2025,14 +2041,16 @@ visual_util.prob_calibration_1d(
 # 7. Nonparametric Calibration II: Monotonic GP
 """""""""""""""""""""""""""""""""
 # TODO(jereliu): separate ls for main gp and derivative gp
-# TODO(jereliu): Urgent: enable sampling for predictive
+# TODO(jereliu): Visualize additional calibration uncertainty.
+# TODO(jereliu): Urgent: alternative method I: sample only posterior predictive mean
+# TODO(jereliu): Urgent: alternative method II: pre-compute matrix in np, then convert to tensor
 
 ADD_CONSTRAINT_POINT = True
 
 """ 7.1. prepare hyperparameters """
 
 # load hyper-parameters
-family_name = "sgpr"
+family_name = "hmc"
 family_name_full = {"hmc": "Hamilton MC",
                     "mfvi": "Mean-field VI",
                     "sgpr": "Sparse Gaussian Process"}[family_name]
@@ -2079,9 +2097,10 @@ if ADD_CONSTRAINT_POINT:
 
 # prepare data
 N = orig_prob_train.size
+N_pred = 1000
 N_deriv = 100
 
-orig_prob_pred = np.linspace(0, 1, num=sample_size).astype(np.float32)
+orig_prob_pred = np.linspace(0, 1, num=N_pred).astype(np.float32)
 orig_prob_derv = np.linspace(0, 1, num=N_deriv).astype(np.float32)
 
 orig_prob_train = np.atleast_2d(orig_prob_train).T
@@ -2091,31 +2110,62 @@ orig_prob_pred = np.atleast_2d(orig_prob_pred).T
 
 """ 7.3. fit monotonic GP"""
 # default parameters and data
-DEFAULT_LS_CALIB_VAL = 0.2
-DEFAULT_DERIV_CDF_SCALE = 1e-3
+DEFAULT_LS_CALIB_VAL = np.asarray(0.2, np.float32)
+DEFAULT_DERIV_CDF_SCALE = np.asarray(1e-3, np.float32)
 
 """ 7.3.1. define mcmc computation graph"""
 num_results = 5000
 num_burnin_steps = 5000
 
+# # pre-compute model parameters for f^* | f_obs, f_deriv
+# pred_cond_pars = gpr_mono.compute_pred_cond_params(
+#     X_new=orig_prob_pred,
+#     X_obs=orig_prob_train,
+#     X_deriv=orig_prob_derv,
+#     ls=DEFAULT_LS_CALIB_VAL,
+#     kernel_func_ff=gp.rbf,
+#     kernel_func_df=gpr_mono.rbf_grad_1d,
+#     kernel_func_dd=gpr_mono.rbf_hess_1d,
+#     ridge_factor_K=1e-1,
+#     ridge_factor_Sigma=0.)
+#
+# Sigma = pred_cond_pars[2]
+# # Sigma[np.abs(Sigma) < 1e-1] = 0
+# Sigma_chol = np.linalg.cholesky(Sigma + 1e-3 * np.eye(Sigma.shape[0]))
+# pred_cond_pars = list(pred_cond_pars)
+# pred_cond_pars[2] = Sigma_chol.astype(np.float32)
+
 mcmc_graph = tf.Graph()
 with mcmc_graph.as_default():
-    # build likelihood by explicitly
+    # build likelihood explicitly
     target_log_prob_fn = gpr_mono.make_log_likelihood_function(
         X_train=orig_prob_train,
         X_deriv=orig_prob_derv,
+        # X_pred=orig_prob_pred,
         y_train=calib_prob_train,
         ls=DEFAULT_LS_CALIB_VAL,
+        # pred_cond_pars=pred_cond_pars,
         deriv_prior_scale=DEFAULT_DERIV_CDF_SCALE,
-        ridge_factor=9e-3,
+        ridge_factor=5e-2,
         cdf_constraint=True
     )
 
     # set up state container
     initial_state = [
-        tf.random_normal([N], stddev=0.01, name='init_gp_func'),
-        tf.random_normal([N_deriv], stddev=0.01, name='init_gp_derv'),
-        tf.constant(0.1, name='init_sigma'),
+        tf.random_normal([N],
+                         mean=1., stddev=0.01,
+                         dtype=tf.float32,
+                         name='init_gp_func'),
+        # tf.random_normal([N_pred],
+        #                  mean=1., stddev=0.01,
+        #                  dtype=tf.float32,
+        #                  name='init_gp_pred'),
+        tf.random_normal([N_deriv],
+                         mean=1., stddev=0.01,
+                         dtype=tf.float32,
+                         name='init_gp_derv'),
+        tf.constant(0.1, dtype=tf.float32,
+                    name='init_sigma'),
     ]
 
     # set up HMC transition kernel
@@ -2140,6 +2190,7 @@ with mcmc_graph.as_default():
         parallel_iterations=10
     )
 
+    # gpf_sample, gpf_pred_sample, gpf_deriv_sample, sigma_sample, = state
     gpf_sample, gpf_deriv_sample, sigma_sample, = state
 
     # set up init op
@@ -2152,18 +2203,23 @@ with tf.Session(graph=mcmc_graph) as sess:
     init_op.run()
     [
         f_samples_val,
+        # f_pred_samples_val,
         f_deriv_samples_val,
         sigma_sample_val,
         is_accepted_,
     ] = sess.run(
         [
             gpf_sample,
+            # gpf_pred_sample,
             gpf_deriv_sample,
             sigma_sample,
             kernel_results.is_accepted,
         ])
     print('Acceptance Rate: {}'.format(np.mean(is_accepted_)))
     sess.close()
+
+plt.plot(orig_prob_train, np.mean(f_samples_val, 0), 'o')
+# plt.plot(orig_prob_pred, np.mean(f_pred_samples_val, 0), 'o')
 
 """ 7.3.3. prediction and visualization"""
 # prediction
@@ -2172,19 +2228,25 @@ df_pred_val = gp.sample_posterior_full(X_new=orig_prob_pred,
                                        f_sample=f_deriv_samples_val.T,
                                        ls=DEFAULT_LS_CALIB_VAL,
                                        kernel_func=gpr_mono.rbf_hess_1d)
-# sample f conditional on f_deriv
-calib_prob_pred_val = (
-    gpr_mono.sample_posterior_predictive(X_new=orig_prob_pred,
-                                         X_obs=orig_prob_train,
-                                         X_deriv=orig_prob_derv,
-                                         f_sample=f_samples_val.T,
-                                         f_deriv_sample=f_deriv_samples_val.T,
-                                         kernel_func_ff=gp.rbf,
-                                         kernel_func_df=gpr_mono.rbf_grad_1d,
-                                         kernel_func_dd=gpr_mono.rbf_hess_1d,
-                                         ls=DEFAULT_LS_CALIB_VAL, )
-)
 
+calib_prob_pred_val = gp.sample_posterior_full(X_new=orig_prob_pred,
+                                               X=orig_prob_train,
+                                               f_sample=f_samples_val.T,
+                                               ls=DEFAULT_LS_CALIB_VAL,
+                                               kernel_func=gp.rbf)
+
+# # sample f conditional on f_deriv
+# calib_prob_pred_val = (
+#     gpr_mono.sample_posterior_predictive(X_new=orig_prob_pred,
+#                                          X_obs=orig_prob_train,
+#                                          X_deriv=orig_prob_derv,
+#                                          f_sample=f_samples_val.T,
+#                                          f_deriv_sample=f_deriv_samples_val.T,
+#                                          kernel_func_ff=gp.rbf,
+#                                          kernel_func_df=gpr_mono.rbf_grad_1d,
+#                                          kernel_func_dd=gpr_mono.rbf_hess_1d,
+#                                          ls=DEFAULT_LS_CALIB_VAL, )
+# )
 
 # plt.plot([[0., 0.], [1., 1.]])
 # sns.regplot(orig_prob_train.squeeze(), calib_prob_train,
@@ -2232,8 +2294,7 @@ visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
                           y_range=[-0.1, 1.1])
 
 """ 7.4. produce calibrated posterior sample"""
-# specifically, for samples corresponding to each observation,
-# produce a empirical cdf in the form of quantiles.
+# re-sample observations based on newly obtained cdf
 calib_prob_pred = np.mean(calib_prob_pred_val, axis=1)
 calib_prob_pred[calib_prob_pred > 1.] = 1.
 calib_prob_pred[calib_prob_pred < 0.] = 0.
@@ -2245,6 +2306,10 @@ ensemble_sample_calib_val = [
     base_sample in ensemble_sample_val.T
 ]
 ensemble_sample_calib_val = np.asarray(ensemble_sample_calib_val).T
+
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/calibration/ensemble_posterior_dist_sample.pkl'.format(family_name)), 'wb') as file:
+    pk.dump(ensemble_sample_calib_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
 # # plot original vs calibrated cdf
 # sample_id = 50
@@ -2298,14 +2363,39 @@ visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
                           )
 
 """ 7.5.2. visualize: ensemble posterior reliability """
+# training
+y_calib = y_valid[calib_train_id]
+y_sample_calib = ensemble_sample_calib_val[:, calib_train_id].T
+
+visual_util.prob_calibration_1d(
+    y_calib, y_sample_calib,
+    title="Train, {}".format(family_name_full),
+    save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                           "{}/calibration/gpr_calibration_prob_train.png".format(family_name)))
+
+visual_util.coverage_index_1d(
+    y_calib, y_sample_calib,
+    title="Train, {}".format(family_name_full),
+    save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                           "{}/calibration/gpr_credible_coverage_train.png".format(family_name)))
+
+
+
+# testing
 y_calib = y_valid[calib_test_id]
 y_sample_calib = ensemble_sample_calib_val[:, calib_test_id].T
 
 visual_util.prob_calibration_1d(
     y_calib, y_sample_calib,
-    title="Ensemble, Test, {}".format(family_name_full),
+    title="Test, {}".format(family_name_full),
     save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                            "{}/calibration/gpr_calibration_prob_test.png".format(family_name)))
+
+visual_util.coverage_index_1d(
+    y_calib, y_sample_calib,
+    title="Test, {}".format(family_name_full),
+    save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                           "{}/calibration/gpr_credible_coverage_test.png".format(family_name)))
 
 # overall
 y_calib = y_valid[calib_sample_id]
@@ -2313,6 +2403,12 @@ y_sample_calib = ensemble_sample_calib_val[:, calib_sample_id].T
 
 visual_util.prob_calibration_1d(
     y_calib, y_sample_calib,
-    title="Ensemble, {}".format(family_name_full),
+    title="Overall, {}".format(family_name_full),
     save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                           "{}/calibration/gpr_calibration_prob.png".format(family_name)))
+                           "{}/calibration/gpr_calibration_prob_all.png".format(family_name)))
+
+visual_util.coverage_index_1d(
+    y_calib, y_sample_calib,
+    title="Overall, {}".format(family_name_full),
+    save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                           "{}/calibration/gpr_credible_coverage_all.png".format(family_name)))
