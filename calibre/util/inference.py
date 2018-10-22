@@ -1,4 +1,6 @@
 """Utility functions for posterior inference"""
+import numpy as np
+
 import tensorflow as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import edward2 as ed
@@ -70,6 +72,53 @@ def make_sparse_gp_parameters(m, S,
         Mu = None
 
     return Mu, Sigma
+
+
+def make_cond_gp_parameters(K_00, K_11, K_22,
+                            K_01, K_20, K_21,
+                            ridge_factor_K=1e-3,
+                            ridge_factor_Sigma=1e-3):
+    """Computes the conditional posterior for f_new|f_obs, f_deriv.
+
+    For stability, numpy is used instead of tensorflow.
+
+    """
+    # convert to np array
+    with tf.Session() as sess:
+        K_00, K_11, K_22, K_01, K_20, K_21 = sess.run([
+            K_00, K_11, K_22, K_01, K_20, K_21
+        ])
+        K_00 = K_00.astype(np.float64)
+        K_11 = K_11.astype(np.float64)
+        K_22 = K_22.astype(np.float64)
+        K_01 = K_01.astype(np.float64)
+        K_20 = K_20.astype(np.float64)
+        K_21 = K_21.astype(np.float64)
+
+    # compute matrix components
+    K_11_inv_12 = np.matmul(np.linalg.pinv(K_11), K_21.T)
+    K_22_inv_21 = np.matmul(np.linalg.pinv(K_22), K_21)
+
+    # assemble projection matrix
+    K_02_1 = K_20.T - np.matmul(K_01, K_11_inv_12)
+    K_22_1 = (K_22 - np.matmul(K_21, K_11_inv_12) +
+              ridge_factor_K * np.eye(K_22.shape[0]))
+    K_01_2 = K_01 - np.matmul(K_20.T, K_22_inv_21)
+    K_11_2 = K_11 - np.matmul(K_21.T, K_22_inv_21)
+
+    # compute mean projection matrix
+    P_01 = np.matmul(K_01_2, np.linalg.pinv(K_11_2))
+    P_02 = np.matmul(K_02_1, np.linalg.pinv(K_22_1))
+
+    # compute Cholesky decomposition for covariance matrix.
+    Sigma = K_00 - K_01.dot(np.linalg.pinv(K_11).dot(K_01.T))
+    # np.matmul(P_01, K_01.T)
+    # - np.matmul(P_02, K_20) +
+    # ridge_factor_Sigma * np.eye(K_00.shape[0]))
+
+    # Sigma_chol = np.linalg.cholesky(Sigma).astype(np.float32)
+
+    return P_01.astype(np.float32), P_02.astype(np.float32), Sigma
 
 
 def scalar_gaussian_variational(name, mean=None, sdev=None):
