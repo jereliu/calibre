@@ -184,7 +184,7 @@ def build_calibration_dataset(Y_obs, Y_sample):
     Y_sample = tf.convert_to_tensor(Y_sample, dtype=tf.float32)
 
     # check model dimension
-    n_obs,  = Y_obs.shape.as_list()
+    n_obs, = Y_obs.shape.as_list()
     n_obs_1, n_sample = Y_sample.shape.as_list()
 
     if n_obs != n_obs_1:
@@ -201,7 +201,7 @@ def build_calibration_dataset(Y_obs, Y_sample):
         tf.cast(tf.expand_dims(F_obs, -1) <
                 tf.expand_dims(F_obs, 0), dtype=tf.float32), axis=0)
 
-    return {"label": P_obs, "feature": F_obs}
+    return {"feature": F_obs, "label": P_obs}
 
 
 def sample_ecdf(n_sample, base_sample, quantile, seed=None):

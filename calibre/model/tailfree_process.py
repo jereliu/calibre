@@ -237,7 +237,7 @@ def check_leaf_models(family_tree, base_pred):
         (ValueError) If any parent node has less than two child.
         (ValueError) If name of any leaf node did not appear in base_pred.
     """
-    # TODO(jereliu): check if there's conflict in model names
+    # TODO(jereliu): check if there's conflict/collision in model/family names
     # TODO(jereliu): check if there's missing link between nodes
 
     # check root name

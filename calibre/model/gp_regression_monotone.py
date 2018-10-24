@@ -47,6 +47,9 @@ from tensorflow.python.ops.distributions.util import fill_triangular
 
 tfd = tfp.distributions
 
+# TODO(jereliu): add proper equality constraint (f(0)=0 and f(1)=1)
+# through spike likelihood on f(0)=0 and f(1)=1.
+
 DEFAULT_PAR_SHIFT = np.array(-5.).astype(np.float32)
 DEFAULT_PAR_SCALE = np.array(1.).astype(np.float32)
 DEFAULT_CDF_CENTER = np.array(0.).astype(np.float32)
