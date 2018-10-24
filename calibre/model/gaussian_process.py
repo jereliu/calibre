@@ -113,7 +113,9 @@ def prior(X, ls, kernel_func=rbf,
             dimension (N,)
 
     """
-    N = X.shape[0]
+    X = tf.convert_to_tensor(X, dtype=tf.float32)
+    N, _ = X.shape.as_list()
+
     K_mat = kernel_func(X, ls=ls, ridge_factor=ridge_factor)
 
     return ed.MultivariateNormalTriL(loc=tf.zeros(N, dtype=tf.float32),
@@ -232,7 +234,9 @@ def variational_mfvi(X, name, **kwargs):
         q_f, q_sig: (ed.RandomVariable) variational family.
         q_f_mean, q_f_sdev: (tf.Variable) variational parameters for q_f
     """
-    N, D = X.shape
+    X = tf.convert_to_tensor(X, dtype=tf.float32)
+
+    N, D = X.shape.as_list()
 
     # define variational parameters
     qf_mean = tf.get_variable(shape=[N], name='{}_mean'.format(name))
@@ -307,7 +311,10 @@ def variational_sgpr(X, Z, ls=1., kernel_func=rbf, ridge_factor=1e-3, name=""):
         q_f, q_sig: (ed.RandomVariable) variational family.
         q_f_mean, q_f_sdev: (tf.Variable) variational parameters for q_f
     """
-    Nx, Nz = X.shape[0], Z.shape[0]
+    X = tf.convert_to_tensor(X, dtype=tf.float32)
+    Z = tf.convert_to_tensor(Z, dtype=tf.float32)
+
+    Nx, Nz = X.shape.as_list()[0], Z.shape.as_list()[0]
 
     # 1. Prepare constants
     # compute matrix constants
