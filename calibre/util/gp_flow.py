@@ -339,11 +339,11 @@ def fit_base_gp_models(X_train, y_train,
             save_addr="{}/reliability/{}_prob.png".format(
                 save_addr_prefix, kern_name))
 
-        # visual_util.marginal_calibration_1d(
-        #     y_valid, valid_samp_list[kern_name],
-        #     title=kern_name,
-        #     save_addr="{}/reliability/{}_marginal.png".format(
-        #         save_addr_prefix, kern_name))
+        visual_util.coverage_index_1d(
+            y_valid, valid_samp_list[kern_name],
+            title=kern_name,
+            save_addr="{}/reliability/{}_coverage.png".format(
+                save_addr_prefix, kern_name))
 
     # save test/validation prediction, and also validation samples
     with open('{}/base_test_pred.pkl'.format(save_addr_prefix), 'wb') as file:

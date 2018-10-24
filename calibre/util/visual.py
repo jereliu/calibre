@@ -264,7 +264,7 @@ def plot_ensemble_weight_median_1d(X, weight_sample, model_names="",
                                alpha=0.1)
 
     ax_median.set_ylim(-0.05, 1.05)
-    ax_median.set_title("Ensemble Weights, Posterior Mode")
+    ax_median.set_title("Ensemble Weights, Posterior Median")
     if model_names:
         ax_median.legend(loc='upper left')
     if save_addr_prefix:
@@ -328,12 +328,12 @@ def prob_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
 
     fig, ax = plt.subplots()
     ax.plot(ecdf_eval, ecdf_eval, c="black")
-    ax.plot(ecdf_valu, ecdf_eval)
+    ax.plot(ecdf_eval, ecdf_valu)
     total_variation = np.mean(np.abs(ecdf_eval - ecdf_valu))
-    plt.title("Probabilistic Calibration, {}, Score: {:.3f}".format(
+    plt.title("Reliability Index, {}, Score: {:.3f}".format(
         title, total_variation))
-    plt.xlabel("Observed CDF Value")
-    plt.ylabel("Expected CDF Value (Uniform(0, 1))")
+    plt.xlabel(r"Empirical CDF for $\hat{F}(Y_i|X_i)$", fontsize=12)
+    plt.ylabel("Expected CDF $Uniform(0, 1)$", fontsize=12)
 
     if save_addr:
         plt.savefig(save_addr)
@@ -356,17 +356,17 @@ def coverage_index_1d(Y_obs, Y_sample, title="", save_addr=""):
         pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
         plt.ioff()
 
-    exp_coverage, obs_coverage = coverage.credible_interval_coverage(
+    nom_coverage, obs_coverage = coverage.credible_interval_coverage(
         Y_obs, Y_sample)
 
     fig, ax = plt.subplots()
-    ax.plot(exp_coverage, exp_coverage, c="black")
-    ax.plot(obs_coverage, exp_coverage)
-    total_variation = np.mean(np.abs(obs_coverage - exp_coverage))
-    plt.title("Credible Interval Coverage, {}, Score: {:.3f}".format(
+    ax.plot(nom_coverage, nom_coverage, c="black")
+    ax.plot(nom_coverage, obs_coverage)
+    total_variation = np.mean(np.abs(obs_coverage - nom_coverage))
+    plt.title("Coverage Index, {}, Score: {:.3f}".format(
         title, total_variation))
-    plt.xlabel("Observed Coverage")
-    plt.ylabel("Expected Coverage")
+    plt.xlabel("Claimed Credible Interval Coverage", fontsize=12)
+    plt.ylabel("Observed Credible Interval Coverage", fontsize=12)
 
     if save_addr:
         plt.savefig(save_addr)
