@@ -112,7 +112,8 @@ for target_function in data_util.FUNC_LIST_2D:
         (X_valid[:, 0] > data_range[0]) & (X_valid[:, 0] <= data_range[1]) &
         (X_valid[:, 1] > data_range[0]) & (X_valid[:, 1] <= data_range[1])
     )[0]
-    calib_sample_id = np.random.choice(len(calib_sample_id), size=1000)
+    calib_sample_id = np.random.choice(calib_sample_id, size=1000,
+                                       replace=False)
 
     if _FIT_BASE_MODELS:
         gpf_util.fit_base_gp_models(
