@@ -24,7 +24,7 @@ import calibre.util.matrix as matrix_util
 from calibre.util.inference import make_value_setter
 from calibre.util.data import generate_1d_data, sin_curve_1d
 from calibre.util.model import sparse_softmax
-from calibre.util.gp_flow import fit_base_gp_models, DEFAULT_KERN_FUNC_DICT
+from calibre.util.gp_flow import fit_base_gp_models, DEFAULT_KERN_FUNC_DICT_GPY
 
 import matplotlib.pyplot as plt
 import seaborn as sns

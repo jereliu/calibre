@@ -7,8 +7,12 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 
-def sin_curve_1d(x):
-    return x + np.sin(4 * x) + np.sin(13 * x)
+def sin_curve_1d(x, freq=(4, 13), x_rate=1.):
+    return x_rate * x + np.sin(freq[0] * x) + np.sin(freq[1] * x)
+
+
+def sin_curve_1d_fast_local(x, bound=[0.1, 0.4], freq=50., scale=0.2):
+    return np.sin(freq * x) * (bound[0] < x) * (x < bound[1]) * scale
 
 
 def cos_curve_1d(x):
@@ -27,13 +31,13 @@ def eggholder(x, y):
     x = 400 * x
     y = 400 * y
     return (-(y + 47) * np.sin(np.sqrt(np.abs(y + x / 2 + 47))) -
-            x * np.sin(np.sqrt(np.abs(x - (y + 47)))))/1000.
+            x * np.sin(np.sqrt(np.abs(x - (y + 47))))) / 1000.
 
 
 def townsend(x, y):
     x = 2 * x
     y = 2 * y
-    return (-(np.cos((x - 0.1) * y)) ** 2 - x * np.sin(3 * x + y))/2.
+    return (-(np.cos((x - 0.1) * y)) ** 2 - x * np.sin(3 * x + y)) / 2.
 
 
 def goldstein(x, y):
@@ -51,7 +55,7 @@ def bird(x, y):
     x = 5 * x
     y = 5 * y
     return (np.sin(x) * np.exp((1 - np.cos(y)) ** 2) +
-            np.cos(y) * np.exp((1 - np.sin(x)) ** 2) + (x - y) ** 2)/100.
+            np.cos(y) * np.exp((1 - np.sin(x)) ** 2) + (x - y) ** 2) / 100.
 
 
 FUNC_LIST_1D = [sin_curve_1d, cos_curve_1d]
@@ -101,11 +105,39 @@ def generate_1d_data_multimodal(N, f_list=[simple_sin_curve_1d, simple_cos_curve
             np.random.uniform(low=0, high=0.6, size=int(N * 0.8)),
             np.random.uniform(low=0.8, high=1, size=N - int(N * 0.8))])
 
+    x = np.sort(x)
     y = []
     for partition_id, x_partition in enumerate(np.split(x, len(f_list))):
         eps = np.random.normal(loc=0, scale=noise_sd, size=len(x_partition))
         y.append(f_list[partition_id](x_partition + eps))
     y = np.concatenate(y)
+
+    return x, y
+
+
+def generate_1d_data_multiscale(N=100,
+                                f_list=(sin_curve_1d,
+                                        sin_curve_1d_fast_local),
+                                noise_sd=0.03, x=None, seed=None,
+                                uniform_x=False, uniform_x_range=(0., 1.)):
+    """Generate 1D regression data in Louizos and Welling (2016)"""
+    np.random.seed(seed)
+
+    if x is None:
+        if uniform_x:
+            x = np.random.uniform(low=uniform_x_range[0],
+                                  high=uniform_x_range[1], size=N)
+        else:
+            x = np.concatenate([
+                np.random.uniform(low=0, high=0.6, size=int(N * 0.8)),
+                np.random.uniform(low=0.8, high=1, size=N - int(N * 0.8))])
+
+    x = np.sort(x.squeeze())
+    y = []
+    for func in f_list:
+        eps = np.random.normal(loc=0, scale=noise_sd, size=len(x))
+        y.append(func(x + eps))
+    y = np.sum(np.asarray(y), 0)
 
     return x, y
 

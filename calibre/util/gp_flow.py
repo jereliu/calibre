@@ -134,6 +134,39 @@ DEFAULT_KERN_FUNC_DICT_GPY = {
 
 }
 
+DEFAULT_KERN_FUNC_DICT_RBF = {
+    "rbf_0.5": {'kernel': gpf.kernels.RBF,
+                'param': {'lengthscales': .5,
+                          'train_kernel_params': False}},
+    "rbf_0.25": {'kernel': gpf.kernels.RBF,
+                 'param': {'lengthscales': .25,
+                           'train_kernel_params': False}},
+    "rbf_0.2": {'kernel': gpf.kernels.RBF,
+                'param': {'lengthscales': .2,
+                          'train_kernel_params': False}},
+    "rbf_0.15": {'kernel': gpf.kernels.RBF,
+                 'param': {'lengthscales': .15,
+                           'train_kernel_params': False}},
+    "rbf_0.1": {'kernel': gpf.kernels.RBF,
+                'param': {'lengthscales': .1,
+                          'train_kernel_params': False}},
+    "rbf_0.075": {'kernel': gpf.kernels.RBF,
+                  'param': {'lengthscales': .075,
+                            'train_kernel_params': False}},
+    "rbf_0.05": {'kernel': gpf.kernels.RBF,
+                 'param': {'lengthscales': .05,
+                           'train_kernel_params': False}},
+    "rbf_0.03": {'kernel': gpf.kernels.RBF,
+                 'param': {'lengthscales': .03,
+                           'train_kernel_params': False}},
+    "rbf_0.02": {'kernel': gpf.kernels.RBF,
+                 'param': {'lengthscales': .02,
+                           'train_kernel_params': False}},
+    "rbf_0.01": {'kernel': gpf.kernels.RBF,
+                 'param': {'lengthscales': .01,
+                           'train_kernel_params': False}},
+}
+
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 """ Predictive functions, GPflow Implementation """
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
