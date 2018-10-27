@@ -407,11 +407,20 @@ if 'ensemble_model_names' in globals():
                       if key in ensemble_model_names}
 
     visual_util.plot_base_prediction(base_pred=base_pred_dict,
+                                     model_names=ensemble_model_names,
                                      X_valid=X_valid, y_valid=y_valid,
                                      X_train=X_train, y_train=y_train,
+                                     X_test=X_test, y_test=y_test,
                                      save_addr=os.path.join(
                                          _SAVE_ADDR_PREFIX,
                                          "{}/ensemble_base_model_fit.png".format(family_name)))
+
+    visual_util.plot_base_prediction(base_pred=base_pred_dict,
+                                     model_names=ensemble_model_names,
+                                     X_valid=X_valid, y_valid=y_valid,
+                                     save_addr=os.path.join(
+                                         _SAVE_ADDR_PREFIX,
+                                         "{}/ensemble_base_model_fit_no_data.png".format(family_name)))
 
 """ 2.3.3. visualize: ensemble posterior predictive mean """
 
@@ -855,11 +864,20 @@ for family_name in ["mfvi", "sgpr"]:
                           if key in ensemble_model_names}
 
         visual_util.plot_base_prediction(base_pred=base_pred_dict,
+                                         model_names=ensemble_model_names,
                                          X_valid=X_valid, y_valid=y_valid,
-                                         X_train=None, y_train=y_train,
+                                         X_train=X_train, y_train=y_train,
+                                         X_test=X_test, y_test=y_test,
                                          save_addr=os.path.join(
                                              _SAVE_ADDR_PREFIX,
                                              "{}/ensemble_base_model_fit.png".format(family_name)))
+
+        visual_util.plot_base_prediction(base_pred=base_pred_dict,
+                                         model_names=ensemble_model_names,
+                                         X_valid=X_valid, y_valid=y_valid,
+                                         save_addr=os.path.join(
+                                             _SAVE_ADDR_PREFIX,
+                                             "{}/ensemble_base_model_fit_no_data.png".format(family_name)))
 
     """ 3.5.3. visualize: ensemble posterior predictive mean """
 
@@ -1305,11 +1323,20 @@ for family_name in ["mfvi_aug", "sgpr_aug"]:
                           if key in ensemble_model_names}
 
         visual_util.plot_base_prediction(base_pred=base_pred_dict,
+                                         model_names=ensemble_model_names,
                                          X_valid=X_valid, y_valid=y_valid,
                                          X_train=X_train, y_train=y_train,
+                                         X_test=X_test, y_test=y_test,
                                          save_addr=os.path.join(
                                              _SAVE_ADDR_PREFIX,
                                              "{}/ensemble_base_model_fit.png".format(family_name)))
+
+        visual_util.plot_base_prediction(base_pred=base_pred_dict,
+                                         model_names=ensemble_model_names,
+                                         X_valid=X_valid, y_valid=y_valid,
+                                         save_addr=os.path.join(
+                                             _SAVE_ADDR_PREFIX,
+                                             "{}/ensemble_base_model_fit_no_data.png".format(family_name)))
 
     """ 4.4.3. visualize: ensemble posterior predictive mean """
 
@@ -1754,11 +1781,20 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                           if key in ensemble_model_names}
 
         visual_util.plot_base_prediction(base_pred=base_pred_dict,
+                                         model_names=ensemble_model_names,
                                          X_valid=X_valid, y_valid=y_valid,
                                          X_train=X_train, y_train=y_train,
+                                         X_test=X_test, y_test=y_test,
                                          save_addr=os.path.join(
                                              _SAVE_ADDR_PREFIX,
                                              "{}/ensemble_base_model_fit.png".format(family_name)))
+
+        visual_util.plot_base_prediction(base_pred=base_pred_dict,
+                                         model_names=ensemble_model_names,
+                                         X_valid=X_valid, y_valid=y_valid,
+                                         save_addr=os.path.join(
+                                             _SAVE_ADDR_PREFIX,
+                                             "{}/ensemble_base_model_fit_no_data.png".format(family_name)))
 
     """ 5.4.3. visualize: ensemble posterior predictive mean """
 

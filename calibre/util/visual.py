@@ -154,32 +154,41 @@ def gpr_2d_visual(pred_mean, pred_cov,
         plt.ion()
 
 
-def plot_base_prediction(base_pred,
+def plot_base_prediction(base_pred, model_names,
                          X_valid, y_valid=None,
                          X_train=None, y_train=None,
+                         X_test=None, y_test=None,
                          ax=None,
                          save_addr="", **kwargs):
     if save_addr:
         pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
         plt.ioff()
 
+    base_pred_plot = np.asarray([base_pred[model_name]
+                                 for model_name in model_names])
+
     # prepare for plotting predictions
     sns_data = pd.DataFrame(
         {"x": np.tile(X_valid.squeeze(), reps=len(base_pred)),
-         "y": np.concatenate(list(base_pred.values())),
-         "model": np.repeat(list(base_pred.keys()), repeats=X_valid.shape[0])})
+         "y": np.concatenate(base_pred_plot),
+         "model": np.repeat(model_names, repeats=X_valid.shape[0])})
 
     # plot baseline predictions.
     if not ax:
         fig, ax = plt.subplots(1, 1)
-    if isinstance(X_train, np.ndarray):
-        ax.plot(X_train.squeeze(), y_train.squeeze(),
-                'o', c='red', markeredgecolor='black')
-    if isinstance(y_valid, np.ndarray):
-        ax.plot(X_valid, y_valid, c='black')
 
     sns.lineplot(x="x", y="y", hue="model", alpha=0.7,
                  data=sns_data, ax=ax, **kwargs)
+
+    if isinstance(y_train, np.ndarray):
+        ax.plot(X_train.squeeze(), y_train.squeeze(),
+                'o', c='red', markeredgecolor='black')
+    if isinstance(y_test, np.ndarray):
+        ax.plot(X_test.squeeze(), y_test.squeeze(),
+                'o', c='blue', markeredgecolor='black')
+    if isinstance(y_valid, np.ndarray):
+        ax.plot(X_valid, y_valid, c='black')
+
     ax.set_ylim(-4, 4)
     ax.set_title("Base Model Predictions")
     ax.legend(loc='lower left')
