@@ -105,7 +105,6 @@ def generate_1d_data_multimodal(N, f_list=[simple_sin_curve_1d, simple_cos_curve
             np.random.uniform(low=0, high=0.6, size=int(N * 0.8)),
             np.random.uniform(low=0.8, high=1, size=N - int(N * 0.8))])
 
-    x = np.sort(x)
     y = []
     for partition_id, x_partition in enumerate(np.split(x, len(f_list))):
         eps = np.random.normal(loc=0, scale=noise_sd, size=len(x_partition))

@@ -20,9 +20,8 @@ from calibre.model import adaptive_ensemble
 
 import calibre.util.visual as visual_util
 import calibre.util.matrix as matrix_util
+import calibre.util.experiment as experiment_util
 
-from calibre.util.inference import make_value_setter
-from calibre.util.data import generate_1d_data, sin_curve_1d
 from calibre.util.model import sparse_softmax
 from calibre.util.gp_flow import fit_base_gp_models, DEFAULT_KERN_FUNC_DICT_GPY
 
@@ -44,38 +43,29 @@ N_train = 20
 N_test = 20
 N_valid = 500
 
-X_train, y_train = generate_1d_data(N=N_train, f=sin_curve_1d,
-                                    noise_sd=0.03, seed=1000,
-                                    uniform_x=True)
-X_test, y_test = generate_1d_data(N=N_test, f=sin_curve_1d,
-                                  noise_sd=0.03, seed=1500,
-                                  uniform_x=True)
-
-X_train = np.expand_dims(X_train, 1).astype(np.float32)
-y_train = y_train.astype(np.float32)
-X_test = np.expand_dims(X_test, 1).astype(np.float32)
-y_test = y_test.astype(np.float32)
-
-std_y_train = np.std(y_train)
-
-X_valid = np.expand_dims(np.linspace(-0.5, 1.5, N_valid), 1).astype(np.float32)
-y_valid = sin_curve_1d(X_valid)
-
-N, D = X_train.shape
+(X_train, y_train,
+ X_test, y_test,
+ X_valid, y_valid, calib_sample_id) = experiment_util.generate_data_1d(
+    N_train=20, N_test=20, N_valid=500, noise_sd=0.03,
+    data_range=(0., 1.), valid_range=(-0.5, 1.5),
+    seed_train=1000, seed_test=1500, seed_calib=100)
 
 #
-plt.plot(np.linspace(-0.5, 1.5, 100),
-         sin_curve_1d(np.linspace(-0.5, 1.5, 100)), c='black')
+plt.plot(X_valid, y_valid, c='black')
 plt.plot(X_train.squeeze(), y_train.squeeze(),
          'o', c='red', markeredgecolor='black')
+plt.plot(X_test.squeeze(), y_test.squeeze(),
+         'o', c='blue', markeredgecolor='black')
+plt.savefig("{}/data.png".format(_SAVE_ADDR_PREFIX))
 plt.close()
+
 
 """ 1.1. Build base GP models using GPflow """
 if _FIT_BASE_MODELS:
     fit_base_gp_models(X_train, y_train,
                        X_test, y_test,
                        X_valid, y_valid,
-                       kern_func_dict=DEFAULT_KERN_FUNC_DICT,
+                       kern_func_dict=DEFAULT_KERN_FUNC_DICT_GPY,
                        n_valid_sample=500,
                        save_addr_prefix="{}/base".format(_SAVE_ADDR_PREFIX))
 

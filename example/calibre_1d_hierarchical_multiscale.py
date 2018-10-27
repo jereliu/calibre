@@ -25,13 +25,13 @@ from calibre.model import adaptive_ensemble
 
 from calibre.calibration import score
 
+import calibre.util.data as data_util
 import calibre.util.visual as visual_util
 import calibre.util.matrix as matrix_util
-import calibre.util.data as data_util
 import calibre.util.gp_flow as gpf_util
 import calibre.util.calibration as calib_util
+import calibre.util.experiment as experiment_util
 
-from calibre.util.data import sin_curve_1d, sin_curve_1d_fast_local
 from calibre.util.inference import make_value_setter
 from calibre.util.gp_flow import DEFAULT_KERN_FUNC_DICT_RBF
 
@@ -55,7 +55,6 @@ _FIT_VI_MODELS = True
 _FIT_AUG_VI_MODELS = True
 _FIT_CALIB_MODELS = True
 
-
 _EXAMPLE_DICTIONARY_SIMPLE = {
     "root": ["smooth",
              "moderate",
@@ -76,7 +75,6 @@ _EXAMPLE_DICTIONARY_SIMPLE = {
     ]
 }
 
-
 """""""""""""""""""""""""""""""""
 # 1. Generate data
 """""""""""""""""""""""""""""""""
@@ -86,44 +84,20 @@ N_test = 50
 N_valid = 500
 
 _SAVE_ADDR_PREFIX = "./result/calibre_1d_tree_multiscale"
-data_range = [0., 1.]
 
-f_list = [
-    partial(sin_curve_1d, freq=(3, 6), x_rate=0.1),
-    partial(sin_curve_1d_fast_local, bound=[0.1, 0.6], freq=50., scale=0.5)
+data_gen_func_list = [
+    partial(data_util.sin_curve_1d, freq=(3, 6), x_rate=0.1),
+    partial(data_util.sin_curve_1d_fast_local, bound=[0.1, 0.6],
+            freq=50., scale=0.5)
 ]
 
-X_train, y_train = data_util.generate_1d_data_multiscale(
-    N=N_train, f_list=f_list,
-    noise_sd=0.01, seed=1500,
-    uniform_x=True,
-    uniform_x_range=data_range)
-X_test, y_test = data_util.generate_1d_data_multiscale(
-    N=N_test, f_list=f_list,
-    noise_sd=0.01, seed=2500,
-    uniform_x=True,
-    uniform_x_range=data_range)
-
-X_train = np.expand_dims(X_train, 1).astype(np.float32)
-y_train = y_train.astype(np.float32)
-X_test = np.expand_dims(X_test, 1).astype(np.float32)
-y_test = y_test.astype(np.float32)
-
-std_y_train = np.std(y_train)
-
-X_valid = np.expand_dims(np.linspace(-0.5, 1.5, N_valid), 1).astype(np.float32)
-_, y_valid = data_util.generate_1d_data_multiscale(
-    f_list=f_list,
-    noise_sd=0.00001, x=X_valid, )
-
-N, D = X_train.shape
-
-np.random.seed(100)
-calib_sample_id = np.where((X_valid > data_range[0]) &
-                           (X_valid <= data_range[1]))[0]
-calib_sample_id = np.random.choice(calib_sample_id,
-                                   size=len(calib_sample_id),
-                                   replace=False)
+(X_train, y_train,
+ X_test, y_test,
+ X_valid, y_valid, calib_sample_id) = experiment_util.generate_data_1d_multiscale(
+    N_train=N_train, N_test=N_test, N_valid=N_valid, noise_sd=0.01,
+    data_gen_func_list=data_gen_func_list,
+    data_range=(0., 1.), valid_range=(-0.5, 1.5),
+    seed_train=1500, seed_test=2500, seed_calib=100)
 
 #
 plt.plot(X_valid, y_valid, c='black')

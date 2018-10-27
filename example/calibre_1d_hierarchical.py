@@ -26,13 +26,12 @@ from calibre.calibration import score
 
 import calibre.util.visual as visual_util
 import calibre.util.matrix as matrix_util
-import calibre.util.data as data_util
 import calibre.util.gp_flow as gpf_util
 import calibre.util.calibration as calib_util
+import calibre.util.experiment as experiment_util
 
-from calibre.util.data import sin_curve_1d, cos_curve_1d
 from calibre.util.inference import make_value_setter
-from calibre.util.gp_flow import DEFAULT_KERN_FUNC_DICT_GPY, DEFAULT_KERN_FUNC_DICT_GPFLOW
+from calibre.util.gp_flow import DEFAULT_KERN_FUNC_DICT_GPFLOW
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -103,6 +102,8 @@ _EXAMPLE_DICTIONARY_FULL = {
     "poly": ["poly_1", "poly_2", "poly_3"]
 }
 
+_SAVE_ADDR_PREFIX = "./result/calibre_1d_tree"
+
 """""""""""""""""""""""""""""""""
 # 1. Generate data
 """""""""""""""""""""""""""""""""
@@ -111,43 +112,20 @@ N_train = 20
 N_test = 20
 N_valid = 500
 
-_SAVE_ADDR_PREFIX = "./result/calibre_1d_tree"
-data_range = [0., 1.]
-X_train, y_train = data_util.generate_1d_data(N=N_train, f=sin_curve_1d,
-                                              noise_sd=0.03, seed=1000,
-                                              uniform_x=True,
-                                              uniform_x_range=data_range)
-X_test, y_test = data_util.generate_1d_data(N=N_test, f=sin_curve_1d,
-                                            noise_sd=0.03, seed=1500,
-                                            uniform_x=True,
-                                            uniform_x_range=data_range)
-
-X_train = np.expand_dims(X_train, 1).astype(np.float32)
-y_train = y_train.astype(np.float32)
-X_test = np.expand_dims(X_test, 1).astype(np.float32)
-y_test = y_test.astype(np.float32)
-
-std_y_train = np.std(y_train)
-
-X_valid = np.expand_dims(np.linspace(-0.5, 1.5, N_valid), 1).astype(np.float32)
-y_valid = sin_curve_1d(X_valid)
-
-N, D = X_train.shape
-
-np.random.seed(100)
-calib_sample_id = np.where((X_valid > data_range[0]) &
-                           (X_valid <= data_range[1]))[0]
-calib_sample_id = np.random.choice(calib_sample_id,
-                                   size=len(calib_sample_id),
-                                   replace=False)
+(X_train, y_train,
+ X_test, y_test,
+ X_valid, y_valid, calib_sample_id) = experiment_util.generate_data_1d(
+    N_train=20, N_test=20, N_valid=500, noise_sd=0.03,
+    data_range=(0., 1.), valid_range=(-0.5, 1.5),
+    seed_train=1000, seed_test=1500, seed_calib=100)
 
 #
-plt.plot(np.linspace(-0.5, 1.5, 100),
-         sin_curve_1d(np.linspace(-0.5, 1.5, 100)), c='black')
+plt.plot(X_valid, y_valid, c='black')
 plt.plot(X_train.squeeze(), y_train.squeeze(),
          'o', c='red', markeredgecolor='black')
 plt.plot(X_test.squeeze(), y_test.squeeze(),
          'o', c='blue', markeredgecolor='black')
+plt.savefig("{}/data.png".format(_SAVE_ADDR_PREFIX))
 plt.close()
 
 """ 1.1. Build base GP models using GPflow """
