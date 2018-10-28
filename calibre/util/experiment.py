@@ -205,3 +205,4 @@ def generate_data_1d_multimodal(
 
 
 """ 2. Visualization """
+# TODO(jereliu): collect all the visualization functions in one place.

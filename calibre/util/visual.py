@@ -20,8 +20,7 @@ def gpr_1d_visual(pred_mean,
                   X_test=None, y_test=None, X_induce=None,
                   quantile_colors=None, quantile_alpha=0.1,
                   y_range=[-4.5, 4.5], add_reference=False,
-                  title="", save_addr="",
-                  ):
+                  title="", save_addr="",):
     """Plots the GP posterior predictive mean and uncertainty.
 
     Args:
@@ -158,7 +157,7 @@ def plot_base_prediction(base_pred, model_names,
                          X_valid, y_valid=None,
                          X_train=None, y_train=None,
                          X_test=None, y_test=None,
-                         ax=None,
+                         ax=None, y_range=[-4.5, 4.5],
                          save_addr="", **kwargs):
     if save_addr:
         pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
@@ -189,7 +188,8 @@ def plot_base_prediction(base_pred, model_names,
     if isinstance(y_valid, np.ndarray):
         ax.plot(X_valid, y_valid, c='black')
 
-    ax.set_ylim(-4, 4)
+    if y_range is not None:
+        ax.set_ylim(y_range)
     ax.set_title("Base Model Predictions")
     ax.legend(loc='lower left')
 
