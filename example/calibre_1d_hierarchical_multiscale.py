@@ -29,6 +29,7 @@ import calibre.util.data as data_util
 import calibre.util.visual as visual_util
 import calibre.util.matrix as matrix_util
 import calibre.util.gp_flow as gpf_util
+import calibre.util.ensemble as ensemble_util
 import calibre.util.calibration as calib_util
 import calibre.util.experiment as experiment_util
 
@@ -45,8 +46,8 @@ import seaborn as sns
 
 tfd = tfp.distributions
 
-DEFAULT_LOG_LS_WEIGHT = np.log(0.1).astype(np.float32)
-DEFAULT_LOG_LS_RESID = np.log(0.1).astype(np.float32)
+DEFAULT_LOG_LS_WEIGHT = np.log(0.05).astype(np.float32)
+DEFAULT_LOG_LS_RESID = np.log(0.03).astype(np.float32)
 
 _FIT_BASE_MODELS = False
 _PLOT_COMPOSITION = False
@@ -117,6 +118,47 @@ if _FIT_BASE_MODELS:
                                 n_valid_sample=500,
                                 save_addr_prefix="{}/base".format(_SAVE_ADDR_PREFIX),
                                 )
+
+""" 1.2. Prediction using other methods """
+os.makedirs(os.path.join(_SAVE_ADDR_PREFIX, "other"), exist_ok=True)
+
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_test_pred.pkl'), 'rb') as file:
+    base_test_pred = pk.load(file)
+
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_valid_pred.pkl'), 'rb') as file:
+    base_valid_pred = pk.load(file)
+
+ens_model_list = {"avg": ensemble_util.AveragingEnsemble(),
+                  "exp": ensemble_util.ExpWeighting(),
+                  "cvs": ensemble_util.CVStacking(),
+                  "gam": ensemble_util.GAMEnsemble()}
+
+# naive averaging
+for ens_name, ens_model in ens_model_list.items():
+    # define family name
+    family_name = ens_name
+    family_name_full = ens_model.name
+
+    ens_model.train(X_test, y_test, base_test_pred)
+    y_valid_pred, y_valid_pred_interval = (
+        ens_model.predict(X_valid, base_valid_pred))
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           'other/ensemble_mean_{}.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(y_valid_pred, file, protocol=pk.HIGHEST_PROTOCOL)
+
+    visual_util.gpr_1d_visual(y_valid_pred,
+                              pred_cov=None,
+                              pred_quantiles=y_valid_pred_interval,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              title="Ensemble Posterior Predictive, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "other/ensemble_posterior_{}.png".format(
+                                      family_name))
+                              )
+
 
 """""""""""""""""""""""""""""""""
 # 2. MCMC
@@ -650,7 +692,7 @@ for family_name in ["mfvi", "sgpr"]:
             elbo = tf.reduce_mean(log_likelihood - kl)
 
             # define optimizer
-            optimizer = tf.train.AdamOptimizer(5e-3)
+            optimizer = tf.train.AdamOptimizer(1e-2)
             train_op = optimizer.minimize(-elbo)
 
             # define init op
