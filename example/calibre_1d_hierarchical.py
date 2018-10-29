@@ -105,7 +105,7 @@ _EXAMPLE_DICTIONARY_FULL = {
 _SAVE_ADDR_PREFIX = "./result/calibre_1d_tree"
 
 """""""""""""""""""""""""""""""""
-# 1. Generate data
+# 0. Generate data
 """""""""""""""""""""""""""""""""
 
 N_train = 20
@@ -128,7 +128,7 @@ plt.plot(X_test.squeeze(), y_test.squeeze(),
 plt.savefig("{}/data.png".format(_SAVE_ADDR_PREFIX))
 plt.close()
 
-""" 1.1. Build base GP models using GPflow """
+""" 0.1. Build base GP models using GPflow """
 if _FIT_BASE_MODELS:
     gpf_util.fit_base_gp_models(X_train, y_train,
                                 X_test, y_test,
@@ -137,6 +137,104 @@ if _FIT_BASE_MODELS:
                                 n_valid_sample=500,
                                 save_addr_prefix="{}/base".format(_SAVE_ADDR_PREFIX),
                                 )
+
+"""""""""""""""""""""""""""""""""
+# 1. MAP
+"""""""""""""""""""""""""""""""""
+family_name = "map"
+family_name_full = "MAP"
+
+family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
+
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_test_pred.pkl'), 'rb') as file:
+    base_test_pred = pk.load(file)
+
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_valid_pred.pkl'), 'rb') as file:
+    base_valid_pred = pk.load(file)
+
+""" 1.1. Make computation graph."""
+N = X_test.shape[0]
+K = len(base_test_pred)
+
+map_graph = tf.Graph()
+with map_graph.as_default():
+    log_joint = ed.make_log_joint_fn(adaptive_ensemble.model_tailfree)
+
+    # aggregate node-specific variable names
+    cond_weight_temp_names = ['temp_{}'.format(model_name) for
+                              model_name in
+                              tail_free.get_parent_node_names(family_tree_dict)]
+    node_weight_names = ['base_weight_{}'.format(model_name) for
+                         model_name in
+                         tail_free.get_nonroot_node_names(family_tree_dict)]
+    node_specific_varnames = cond_weight_temp_names + node_weight_names
+
+    # initialize variable containers
+    map_state = [
+                    tf.Variable(tf.constant(0.1), name='map_sigma'),
+                    tf.Variable(tf.constant(0.1), name='map_ls_weight'),
+                    tf.Variable(tf.constant(0.1), name='map_ls_resid'),
+                    tf.Variable(tf.zeros([N]), name='map_ensemble_resid'),
+                ] + [
+                    tf.Variable(tf.ones([]), name='map_{}'.format(var_name)) for
+                    var_name in cond_weight_temp_names
+                ] + [
+                    tf.Variable(tf.zeros([N]), name='map_{}'.format(var_name)) for
+                    var_name in node_weight_names
+                ]
+
+
+    def target_log_prob_fn(state):
+        """Unnormalized target density as a function of states."""
+        # build kwargs for base model weight using positional args
+
+        sigma, ls_weight, ls_resid, ensemble_resid = state[:4]
+
+        node_specific_kwargs = dict(zip(node_specific_varnames,
+                                        state[4:]))
+
+        return log_joint(X=X_test,
+                         base_pred=base_test_pred,
+                         family_tree=family_tree_dict,
+                         y=y_test.squeeze(),
+                         log_ls_weight=ls_weight,
+                         log_ls_resid=ls_resid,
+                         sigma=sigma,
+                         ensemble_resid=ensemble_resid,
+                         **node_specific_kwargs)
+
+
+    # define optimize and loss op
+    optimizer = tf.train.AdamOptimizer(learning_rate=5e-3)
+
+    loss_op = - target_log_prob_fn(map_state)
+    train_op = optimizer.minimize(loss_op)
+
+    init_op = tf.global_variables_initializer()
+
+    map_graph.finalize()
+
+""" 1.2. Execute optimization."""
+max_steps = 10000
+
+with tf.Session(graph=map_graph) as sess:
+    start_time = time.time()
+
+    sess.run(init_op)
+    for step in range(max_steps):
+        start_time = time.time()
+        _, loss_val = sess.run([train_op, loss_op])
+        if step % 100 == 0:
+            duration = time.time() - start_time
+            print("Step: {:>3d} ELBO: {:.3f}, ({:.3f} sec)".format(
+                step, loss_val, duration))
+
+    param_map_est = sess.run([map_state])
+
+    sess.close()
+
+DEFAULT_LOG_LS_WEIGHT = param_map_est[1].astype(np.float32)
+DEFAULT_LOG_LS_RESID = param_map_est[2].astype(np.float32)
 
 """""""""""""""""""""""""""""""""
 # 2. MCMC
