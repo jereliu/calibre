@@ -182,9 +182,9 @@ def model_tailfree(X, base_pred, family_tree=None,
             specify the family tree between models, if None then assume there's
             no structure (i.e. flat).
         log_ls_weight: (float32) length-scale parameter for weight GP.
-            If None then will estimate automatically.
+            If None then will estimate with normal prior.
         log_ls_resid: (float32) length-scale parameter for residual GP.
-            If None then will estimate automatically.
+            If None then will estimate with normal prior.
         **kwargs: Additional parameters to pass to tail_free.prior.
 
     Returns:

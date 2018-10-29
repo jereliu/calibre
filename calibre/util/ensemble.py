@@ -18,6 +18,8 @@ from pygam import LinearGAM, s, te, l
 from pygam.terms import TermList
 
 
+# TODO(jereliu): change to uncertainty estimate to variance rather than quantile
+
 class EnsembleModel(ABC):
     def __init__(self, ensemble_model_name):
         self.name = ensemble_model_name
@@ -93,9 +95,9 @@ class AveragingEnsemble(EnsembleModel):
         predict = [base_pred[model_name] * self.model_weight[model_name]
                    for model_name in self.model_weight.keys()]
 
-        prediction_intervals = None
+        prediction_var = None
 
-        return np.sum(np.asarray(predict), axis=0), prediction_intervals
+        return np.sum(np.asarray(predict), axis=0), prediction_var
 
 
 class ExpWeighting(EnsembleModel):
@@ -153,9 +155,9 @@ class ExpWeighting(EnsembleModel):
                                                          return_normal_weight=True)
         self.model_weight = model_weight
 
-        prediction_intervals = None
+        prediction_var = None
 
-        return prediction, prediction_intervals
+        return prediction, prediction_var
 
     def _exponential_sum(self, temp_param, base_pred, return_normal_weight=False):
         """Sum over base predictions under given temperature parameter.
@@ -269,9 +271,9 @@ class CVStacking(EnsembleModel):
 
         predict = [base_pred[model_name] * self.model_weight[model_name]
                    for model_name in self.model_weight.keys()]
-        prediction_intervals = None
+        prediction_var = None
 
-        return np.sum(np.asarray(predict), axis=0), prediction_intervals
+        return np.sum(np.asarray(predict), axis=0), prediction_var
 
     @staticmethod
     def _estimate_simplex_weight(base_error):
@@ -315,9 +317,11 @@ class CVStacking(EnsembleModel):
 class GAMEnsemble(EnsembleModel):
     """Implements GAM ensemble in [1]."""
 
-    def __init__(self):
-        super().__init__("Generalized Additive Ensemble")
+    def __init__(self, residual_process=True):
+        model_name = "Generalized Additive Ensemble" if residual_process else "Linear Stacking"
+        super().__init__(model_name)
         self.gam_model = None
+        self.model_residual = residual_process
 
     def train(self, X, y, base_pred):
         """Trains ensemble model based on data and base predictions.
@@ -340,7 +344,7 @@ class GAMEnsemble(EnsembleModel):
         # perform estimation
         self.gam_model.gridsearch(X=ens_feature, y=y, progress=False)
 
-    def predict(self, X, base_pred, pred_intervals=(.68, .95, .99)):
+    def predict(self, X, base_pred):
         """Predicts label based on feature and base model.
 
         Args:
@@ -348,11 +352,9 @@ class GAMEnsemble(EnsembleModel):
             base_pred: (dict of np.ndarray) Dictionary of base model predictions
                 With keys (str) being model name, and values (np.ndarray) being
                 predictions corresponds to X and y.
-            pred_intervals: (tuple of float) width of predictive intervals
 
         Returns:
-            (np.ndarray) ensemble prediction
-            (list of 2-list) ensemble predictive intervals
+            (np.ndarray) ensemble prediction and variance
 
         Raises:
             (ValueError) If self.model_weight is empty.
@@ -366,30 +368,33 @@ class GAMEnsemble(EnsembleModel):
 
         # prediction
         prediction = self.gam_model.predict(ens_feature)
-        prediction_intervals = [
-            list(self.gam_model.prediction_intervals(ens_feature, width=interval).T)
-            for interval in pred_intervals]
+        prediction_var = ((self.gam_model.prediction_intervals(
+            ens_feature, width=.95)[:, 1] - prediction) / 2) ** 2
 
-        return prediction, prediction_intervals
+        return prediction, prediction_var
 
-    @staticmethod
-    def _build_ensemble_feature(X, base_pred):
+    def _build_ensemble_feature(self, X, base_pred):
         """Builds featurre array and corresponding GAM TermList.
 
         Terms corresponding to X will be summation of
             dimension-wise splines, plus a tensor-product term across all dimension.
 
         """
-        model_preds = np.asarray(list(base_pred.values())).T
+        ens_feature = np.asarray(list(base_pred.values())).T
+        term_list = [l(dim_index) for dim_index in range(ens_feature.shape[1])]
 
-        ens_feature = np.concatenate([X, model_preds], axis=1)
+        # optionally, add residual process
+        if self.model_residual:
+            # build gam terms
+            term_list += [s(dim_index) for dim_index in
+                          range(ens_feature.shape[1],
+                                ens_feature.shape[1] + X.shape[1])]
+            if X.shape[1] > 1:
+                term_list += [te(*list(ens_feature.shape[1] +
+                                       np.array(range(X.shape[1]))))]
 
-        # build gam terms
-        term_list = [s(dim_index) for dim_index in range(X.shape[1])]
-        if X.shape[1] > 1:
-            term_list += [te(*list(range(X.shape[1])))]
-        term_list += [l(dim_index) for dim_index in range(X.shape[1],
-                                                          ens_feature.shape[1])]
+            # update features
+            ens_feature = np.concatenate([ens_feature, X], axis=1)
 
         gam_feature_terms = TermList(*term_list)
 
