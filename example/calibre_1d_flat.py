@@ -30,6 +30,8 @@ import seaborn as sns
 
 tfd = tfp.distributions
 
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
 DEFAULT_LS_WEIGHT = 0.2
 DEFAULT_LS_RESID = 0.2
 _SAVE_ADDR_PREFIX = "./result/calibre_1d_flat"

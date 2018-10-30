@@ -18,9 +18,10 @@ def gpr_1d_visual(pred_mean,
                   pred_samples=None,
                   X_train=None, y_train=None,
                   X_test=None, y_test=None, X_induce=None,
+                  compute_rmse=True, rmse_id=None,
                   quantile_colors=None, quantile_alpha=0.1,
                   y_range=[-4.5, 4.5], add_reference=False,
-                  title="", save_addr="",):
+                  title="", save_addr=""):
     """Plots the GP posterior predictive mean and uncertainty.
 
     Args:
@@ -35,6 +36,9 @@ def gpr_1d_visual(pred_mean,
         X_test: (np.ndarray) X values in test dataset.
         y_test: (np.ndarray) y values in test dataset.
         X_induce: (np.ndarray)  X values marking the position of inducing points.
+        compute_rmse: (bool) Whether to compute test RMSE.
+        rmse_id: (np.ndarray of int or None) Subset of X_test to compute
+            rmse on. If None then all X_test are used.
         title: (str) Title of the image.
         save_addr: (str) Address to save image to.
 
@@ -89,6 +93,17 @@ def gpr_1d_visual(pred_mean,
 
     # plot ground truth
     if y_test is not None:
+        # compute rmse
+        if compute_rmse and pred_mean is not None:
+            if isinstance(rmse_id, np.ndarray):
+                test_rmse = metric_util.rmse(y_test[rmse_id],
+                                             pred_mean[rmse_id])
+            else:
+                test_rmse = metric_util.rmse(y_test, pred_mean)
+
+            title = '{}, RMSE={:.4f}'.format(title, test_rmse)
+
+        # plot y_test
         if isinstance(X_test, np.ndarray):
             y_X_ratio = len(y_test) / len(X_test)
             if y_X_ratio.is_integer():
@@ -142,7 +157,7 @@ def gpr_2d_visual(pred_mean, pred_cov,
 
     # optionally, compute RMSE
     if pred_mean.size == y_test.size:
-        rmse = np.mean((pred_mean - y_test) ** 2)
+        rmse = metric_util.rmse(y_test, pred_mean)
         title = "{}, RMSE={:.4f}".format(title, rmse)
 
     plt.title(title)
