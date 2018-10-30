@@ -241,13 +241,13 @@ def monte_carlo_dual_expectation(f, samples_1, samples_2,
 
 def rmse(y_obs, y_pred):
     """Computes root mean square error."""
-    return np.sqrt(np.mean((y_obs - y_pred) ** 2))
+    return np.sqrt(np.mean((y_obs.squeeze() - y_pred.squeeze()) ** 2))
 
 
 def rsqure(y_obs, y_pred):
     """Computes Standardized R-square."""
-    nom = np.mean((y_obs - y_pred) ** 2)
-    denom = np.mean((y_obs - np.mean(y_obs)) ** 2)
+    nom = np.mean((y_obs.squeeze() - y_pred.squeeze()) ** 2)
+    denom = np.mean((y_obs.squeeze() - np.mean(y_obs)) ** 2)
     return 1 - (nom / denom)
 
 
