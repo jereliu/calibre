@@ -1,4 +1,5 @@
 """Calibre (Adaptive Ensemble) with hierarchical structure using MCMC and Penalized VI. """
+# TODO(jereliu): adjust VI for ls_weight/ls_resid prior
 import os
 import time
 
@@ -39,12 +40,9 @@ from calibre.util.gp_flow import DEFAULT_KERN_FUNC_DICT_RBF
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# TODO(jereliu): redesign data-generation mechanism to reflect varying
-# smoothness and discontinuous
-
-# TODO(jereliu): adjust VI for ls_weight/ls_resid prior
-
 tfd = tfp.distributions
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 DEFAULT_LOG_LS_WEIGHT = np.log(0.1).astype(np.float32)
 DEFAULT_LOG_LS_RESID = np.log(0.1).astype(np.float32)

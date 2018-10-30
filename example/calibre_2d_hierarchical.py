@@ -38,6 +38,8 @@ import seaborn as sns
 
 tfd = tfp.distributions
 
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
 _FIT_BASE_MODELS = False
 _FIT_MCMC_MODELS = False
 _FIT_VI_MODELS = False
