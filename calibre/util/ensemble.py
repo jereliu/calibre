@@ -225,7 +225,7 @@ class ExpWeighting(EnsembleModel):
 
 class CVStacking(EnsembleModel):
     def __init__(self):
-        super().__init__("Cross-validated Stacking")
+        super().__init__("Cross-validated Convex Stacking")
         self.model_weight = None
 
     def train(self, X, y, base_pred):
@@ -317,10 +317,21 @@ class CVStacking(EnsembleModel):
 class GAMEnsemble(EnsembleModel):
     """Implements GAM ensemble in [1]."""
 
-    def __init__(self, residual_process=True):
-        model_name = "Generalized Additive Ensemble" if residual_process else "Linear Stacking"
+    def __init__(self, nonlinear_ensemble=False, residual_process=True):
+        """
+        Initializer.
+
+        Args:
+            nonlinear_ensemble: (bool) Whether use nonlinear term to transform base model.
+            residual_process: (bool) Whether model residual process.
+        """
+        model_name = (
+            "Generalized Additive Ensemble" if residual_process
+            else "{} Stacking".format("Nonlinear" if nonlinear_ensemble else "Linear"))
+
         super().__init__(model_name)
         self.gam_model = None
+        self.nonlinear_ensemble = nonlinear_ensemble
         self.model_residual = residual_process
 
     def train(self, X, y, base_pred):
@@ -341,8 +352,10 @@ class GAMEnsemble(EnsembleModel):
         # define model
         self.gam_model = LinearGAM(feature_terms)
 
-        # perform estimation
-        self.gam_model.gridsearch(X=ens_feature, y=y, progress=False)
+        # additional fine-tuning
+        lam_grid = self._build_lambda_grid(n_grid=100)
+        self.gam_model.gridsearch(X=ens_feature, y=y, lam=lam_grid,
+                                  progress=False)
 
     def predict(self, X, base_pred):
         """Predicts label based on feature and base model.
@@ -380,8 +393,10 @@ class GAMEnsemble(EnsembleModel):
             dimension-wise splines, plus a tensor-product term across all dimension.
 
         """
+        ensemble_term_func = s if self.nonlinear_ensemble else l
+
         ens_feature = np.asarray(list(base_pred.values())).T
-        term_list = [l(dim_index) for dim_index in range(ens_feature.shape[1])]
+        term_list = [ensemble_term_func(dim_index) for dim_index in range(ens_feature.shape[1])]
 
         # optionally, add residual process
         if self.model_residual:
@@ -399,3 +414,14 @@ class GAMEnsemble(EnsembleModel):
         gam_feature_terms = TermList(*term_list)
 
         return ens_feature, gam_feature_terms
+
+    def _build_lambda_grid(self, n_grid=100):
+        # count actual number of terms in each nonlinear term
+        # (e.g. te(0, 1) will actually have two terms)
+        n_terms = np.sum([len(model_term._terms) if model_term.istensor else 1
+                          for model_term in self.gam_model.terms])
+        lam = np.random.rand(n_grid, n_terms)
+        # rescale to between (0, 1)
+        lam_norm = (lam - np.min(lam)) / (np.max(lam) - np.min(lam))
+
+        return np.exp((lam_norm - 0.5) * 6)
