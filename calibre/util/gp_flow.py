@@ -138,6 +138,18 @@ DEFAULT_KERN_FUNC_DICT_RBF = {
     "rbf_0.5": {'kernel': gpf.kernels.RBF,
                 'param': {'lengthscales': .5,
                           'train_kernel_params': False}},
+    "rbf_0.4": {'kernel': gpf.kernels.RBF,
+                 'param': {'lengthscales': .4,
+                           'train_kernel_params': False}},
+    "rbf_0.35": {'kernel': gpf.kernels.RBF,
+                'param': {'lengthscales': .35,
+                          'train_kernel_params': False}},
+    "rbf_0.3": {'kernel': gpf.kernels.RBF,
+                 'param': {'lengthscales': .3,
+                           'train_kernel_params': False}},
+    "rbf_0.275": {'kernel': gpf.kernels.RBF,
+                 'param': {'lengthscales': .275,
+                           'train_kernel_params': False}},
     "rbf_0.25": {'kernel': gpf.kernels.RBF,
                  'param': {'lengthscales': .25,
                            'train_kernel_params': False}},
@@ -295,6 +307,7 @@ def fit_gpy(X_train, y_train,
 
 def fit_base_gp_models(X_train, y_train,
                        X_test, y_test, X_valid, y_valid,
+                       y_valid_rmse_id=None,
                        kern_func_dict=DEFAULT_KERN_FUNC_DICT_GPY,
                        n_valid_sample=5000,
                        n_train_step=20000,
@@ -308,6 +321,8 @@ def fit_base_gp_models(X_train, y_train,
         y_test: (np.ndarray of float32) Testing labels (N_train, D).
         X_valid: (np.ndarray of float32) Validation features (N_test, D).
         y_valid: (np.ndarray of float32) Validation labels (N_train, D).
+        y_valid_rmse_id: (np.ndarray of int) Sample id in y_valid to compute
+            RMSE over. If None then use entire y_valid
         kern_func_dict: (dict) Dictionary of kernel functions and kernel kwargs
             to pass to fit_gpflow.
             For example see calibre.util.gp_flow.DEFAULT_KERN_FUNC_DICT
@@ -362,6 +377,7 @@ def fit_base_gp_models(X_train, y_train,
                 pred_mean=mu_valid, pred_cov=var_valid,
                 X_train=X_train, y_train=y_train,
                 X_test=X_valid, y_test=y_valid,
+                compute_rmse=True, rmse_id=y_valid_rmse_id,
                 title=kern_name,
                 save_addr="{}/fit/{}.png".format(save_addr_prefix, kern_name))
         elif X_train.squeeze().ndim == 2:

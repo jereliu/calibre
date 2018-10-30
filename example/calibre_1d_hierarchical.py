@@ -27,11 +27,12 @@ from calibre.calibration import score
 import calibre.util.visual as visual_util
 import calibre.util.matrix as matrix_util
 import calibre.util.gp_flow as gpf_util
+import calibre.util.ensemble as ensemble_util
 import calibre.util.calibration as calib_util
 import calibre.util.experiment as experiment_util
 
 from calibre.util.inference import make_value_setter
-from calibre.util.gp_flow import DEFAULT_KERN_FUNC_DICT_GPFLOW
+from calibre.util.gp_flow import DEFAULT_KERN_FUNC_DICT_RBF
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -48,9 +49,10 @@ DEFAULT_LOG_LS_RESID = np.log(0.2).astype(np.float32)
 
 _FIT_BASE_MODELS = False
 _PLOT_COMPOSITION = False
+_FIT_MAP_MODELS = False
 _FIT_MCMC_MODELS = False
 _FIT_VI_MODELS = False
-_FIT_AUG_VI_MODELS = False
+_FIT_AUG_VI_MODELS = True
 _FIT_CALIB_MODELS = False
 
 _EXAMPLE_DICTIONARY_SIMPLE = {
@@ -91,6 +93,13 @@ _EXAMPLE_DICTIONARY_SIMPLE = {
 #     # "poly": ["poly_1", "poly_2", "poly_3"]
 # }
 
+_EXAMPLE_DICTIONARY_SIMPLE = {
+    "root": ["rbf_0.3",
+             "rbf_0.25",
+             "rbf_0.05",
+             "rbf_0.03", ]
+}
+
 _EXAMPLE_DICTIONARY_FULL = {
     "root": ["rbf", "period", "rquad", "poly"],
     "rbf": ["rbf_1", "rbf_0.5", "rbf_0.2",
@@ -108,14 +117,14 @@ _SAVE_ADDR_PREFIX = "./result/calibre_1d_tree"
 # 0. Generate data
 """""""""""""""""""""""""""""""""
 
-N_train = 20
-N_test = 20
+N_train = 35
+N_test = 35
 N_valid = 500
 
 (X_train, y_train,
  X_test, y_test,
  X_valid, y_valid, calib_sample_id) = experiment_util.generate_data_1d(
-    N_train=20, N_test=20, N_valid=500, noise_sd=0.03,
+    N_train=N_train, N_test=N_test, N_valid=N_valid, noise_sd=0.03,
     data_range=(0., 1.), valid_range=(-0.5, 1.5),
     seed_train=1000, seed_test=1500, seed_calib=100)
 
@@ -128,15 +137,91 @@ plt.plot(X_test.squeeze(), y_test.squeeze(),
 plt.savefig("{}/data.png".format(_SAVE_ADDR_PREFIX))
 plt.close()
 
-""" 0.1. Build base GP models using GPflow """
+""" 0.1. Build base GP models using GPflow/GPy """
 if _FIT_BASE_MODELS:
     gpf_util.fit_base_gp_models(X_train, y_train,
                                 X_test, y_test,
                                 X_valid, y_valid,
-                                kern_func_dict=DEFAULT_KERN_FUNC_DICT_GPFLOW,
+                                y_valid_rmse_id=calib_sample_id,
+                                kern_func_dict=DEFAULT_KERN_FUNC_DICT_RBF,
                                 n_valid_sample=500,
                                 save_addr_prefix="{}/base".format(_SAVE_ADDR_PREFIX),
                                 )
+
+""" 0.2. Prediction using other methods """
+os.makedirs(os.path.join(_SAVE_ADDR_PREFIX, "other"), exist_ok=True)
+
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_test_pred.pkl'), 'rb') as file:
+    base_test_pred = pk.load(file)
+
+with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_valid_pred.pkl'), 'rb') as file:
+    base_valid_pred = pk.load(file)
+
+base_test_pred = {model_name: base_test_pred[model_name]
+                  for model_name in
+                  tail_free.get_leaf_model_names(_EXAMPLE_DICTIONARY_SIMPLE)}
+base_valid_pred = {model_name: base_valid_pred[model_name]
+                   for model_name in
+                   tail_free.get_leaf_model_names(_EXAMPLE_DICTIONARY_SIMPLE)}
+
+ens_model_list = {"avg": ensemble_util.AveragingEnsemble(),
+                  "exp": ensemble_util.ExpWeighting(),
+                  "cvs": ensemble_util.CVStacking(),
+                  "gam": ensemble_util.GAMEnsemble(),
+                  "lnr": ensemble_util.GAMEnsemble(residual_process=False),
+                  "nlr": ensemble_util.GAMEnsemble(nonlinear_ensemble=True,
+                                                   residual_process=False)}
+
+for ens_name, ens_model in ens_model_list.items():
+    # define family name
+    family_name = ens_name
+    family_name_full = ens_model.name
+
+    ens_model.train(X_test, y_test, base_test_pred)
+    y_valid_pred, y_valid_pred_se = (
+        ens_model.predict(X_valid, base_valid_pred))
+
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           'other/ensemble_mean_{}.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(y_valid_pred, file, protocol=pk.HIGHEST_PROTOCOL)
+
+    visual_util.gpr_1d_visual(y_valid_pred,
+                              pred_cov=y_valid_pred_se,
+                              X_train=X_test, y_train=y_test,
+                              X_test=X_valid, y_test=y_valid,
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive, {}".format(family_name_full),
+                              save_addr=os.path.join(
+                                  _SAVE_ADDR_PREFIX,
+                                  "other/ensemble_posterior_{}.png".format(
+                                      family_name))
+                              )
+
+    # if prob prediction, examine uncertainty quantification
+    if y_valid_pred_se is not None:
+        with tf.Session() as sess:
+            ensemble_sample = gp.variational_mfvi_sample(
+                n_sample=1000,
+                qf_mean=y_valid_pred,
+                qf_sdev=np.sqrt(y_valid_pred_se))
+            ensemble_sample_val = sess.run(ensemble_sample)
+            sess.close()
+
+        # measure calibration
+        y_calib = y_valid[calib_sample_id]
+        y_sample_calib = ensemble_sample_val[:, calib_sample_id].T
+
+        visual_util.prob_calibration_1d(
+            y_calib, y_sample_calib,
+            title="Ensemble, {}".format(family_name_full),
+            save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                   "other/ensemble_calibration_prob_{}.png".format(family_name)))
+
+        visual_util.coverage_index_1d(
+            y_calib, y_sample_calib,
+            title="Ensemble, {}".format(family_name_full),
+            save_addr=os.path.join(_SAVE_ADDR_PREFIX,
+                                   "other/ensemble_credible_coverage_{}.png".format(family_name)))
 
 """""""""""""""""""""""""""""""""
 # 1. MAP
@@ -156,85 +241,86 @@ with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_valid_pred.pkl'), 'rb') as 
 N = X_test.shape[0]
 K = len(base_test_pred)
 
-map_graph = tf.Graph()
-with map_graph.as_default():
-    log_joint = ed.make_log_joint_fn(adaptive_ensemble.model_tailfree)
+if _FIT_MAP_MODELS:
+    map_graph = tf.Graph()
+    with map_graph.as_default():
+        log_joint = ed.make_log_joint_fn(adaptive_ensemble.model_tailfree)
 
-    # aggregate node-specific variable names
-    cond_weight_temp_names = ['temp_{}'.format(model_name) for
-                              model_name in
-                              tail_free.get_parent_node_names(family_tree_dict)]
-    node_weight_names = ['base_weight_{}'.format(model_name) for
-                         model_name in
-                         tail_free.get_nonroot_node_names(family_tree_dict)]
-    node_specific_varnames = cond_weight_temp_names + node_weight_names
+        # aggregate node-specific variable names
+        cond_weight_temp_names = ['temp_{}'.format(model_name) for
+                                  model_name in
+                                  tail_free.get_parent_node_names(family_tree_dict)]
+        node_weight_names = ['base_weight_{}'.format(model_name) for
+                             model_name in
+                             tail_free.get_nonroot_node_names(family_tree_dict)]
+        node_specific_varnames = cond_weight_temp_names + node_weight_names
 
-    # initialize variable containers
-    map_state = [
-                    tf.Variable(tf.constant(0.1), name='map_sigma'),
-                    tf.Variable(tf.constant(0.1), name='map_ls_weight'),
-                    tf.Variable(tf.constant(0.1), name='map_ls_resid'),
-                    tf.Variable(tf.zeros([N]), name='map_ensemble_resid'),
-                ] + [
-                    tf.Variable(tf.ones([]), name='map_{}'.format(var_name)) for
-                    var_name in cond_weight_temp_names
-                ] + [
-                    tf.Variable(tf.zeros([N]), name='map_{}'.format(var_name)) for
-                    var_name in node_weight_names
-                ]
-
-
-    def target_log_prob_fn(state):
-        """Unnormalized target density as a function of states."""
-        # build kwargs for base model weight using positional args
-
-        sigma, ls_weight, ls_resid, ensemble_resid = state[:4]
-
-        node_specific_kwargs = dict(zip(node_specific_varnames,
-                                        state[4:]))
-
-        return log_joint(X=X_test,
-                         base_pred=base_test_pred,
-                         family_tree=family_tree_dict,
-                         y=y_test.squeeze(),
-                         log_ls_weight=ls_weight,
-                         log_ls_resid=ls_resid,
-                         sigma=sigma,
-                         ensemble_resid=ensemble_resid,
-                         **node_specific_kwargs)
+        # initialize variable containers
+        map_state = [
+                        tf.Variable(tf.constant(0.1), name='map_sigma'),
+                        tf.Variable(tf.constant(-2.5), name='map_ls_weight'),
+                        tf.Variable(tf.constant(-2.5), name='map_ls_resid'),
+                        tf.Variable(tf.zeros([N]), name='map_ensemble_resid'),
+                    ] + [
+                        tf.Variable(tf.ones([]), name='map_{}'.format(var_name)) for
+                        var_name in cond_weight_temp_names
+                    ] + [
+                        tf.Variable(tf.zeros([N]), name='map_{}'.format(var_name)) for
+                        var_name in node_weight_names
+                    ]
 
 
-    # define optimize and loss op
-    optimizer = tf.train.AdamOptimizer(learning_rate=5e-3)
+        def target_log_prob_fn(state):
+            """Unnormalized target density as a function of states."""
+            # build kwargs for base model weight using positional args
 
-    loss_op = - target_log_prob_fn(map_state)
-    train_op = optimizer.minimize(loss_op)
+            sigma, log_ls_weight, log_ls_resid, ensemble_resid = state[:4]
 
-    init_op = tf.global_variables_initializer()
+            node_specific_kwargs = dict(zip(node_specific_varnames,
+                                            state[4:]))
 
-    map_graph.finalize()
+            return log_joint(X=X_test,
+                             base_pred=base_test_pred,
+                             family_tree=family_tree_dict,
+                             y=y_test.squeeze(),
+                             ls_weight=log_ls_weight,
+                             ls_resid=log_ls_resid,
+                             sigma=sigma,
+                             ensemble_resid=ensemble_resid,
+                             **node_specific_kwargs)
 
-""" 1.2. Execute optimization."""
-max_steps = 10000
 
-with tf.Session(graph=map_graph) as sess:
-    start_time = time.time()
+        # define optimize and loss op
+        optimizer = tf.train.AdamOptimizer(learning_rate=5e-3)
 
-    sess.run(init_op)
-    for step in range(max_steps):
+        loss_op = - target_log_prob_fn(map_state)
+        train_op = optimizer.minimize(loss_op)
+
+        init_op = tf.global_variables_initializer()
+
+        map_graph.finalize()
+
+    """ 1.2. Execute optimization."""
+    max_steps = 10000
+
+    with tf.Session(graph=map_graph) as sess:
         start_time = time.time()
-        _, loss_val = sess.run([train_op, loss_op])
-        if step % 100 == 0:
-            duration = time.time() - start_time
-            print("Step: {:>3d} ELBO: {:.3f}, ({:.3f} sec)".format(
-                step, loss_val, duration))
 
-    param_map_est = sess.run([map_state])
+        sess.run(init_op)
+        for step in range(max_steps):
+            start_time = time.time()
+            _, loss_val = sess.run([train_op, loss_op])
+            if step % 100 == 0:
+                duration = time.time() - start_time
+                print("Step: {:>3d} ELBO: {:.3f}, ({:.3f} sec)".format(
+                    step, loss_val, duration))
 
-    sess.close()
+        param_map_est = sess.run(map_state)
 
-DEFAULT_LOG_LS_WEIGHT = param_map_est[1].astype(np.float32)
-DEFAULT_LOG_LS_RESID = param_map_est[2].astype(np.float32)
+        sess.close()
+
+    DEFAULT_LOG_LS_WEIGHT = param_map_est[1].astype(np.float32)
+    DEFAULT_LOG_LS_RESID = param_map_est[2].astype(np.float32)
 
 """""""""""""""""""""""""""""""""
 # 2. MCMC
@@ -278,7 +364,7 @@ if _FIT_MCMC_MODELS:
         node_specific_varnames = cond_weight_temp_names + node_weight_names
 
 
-        def target_log_prob_fn(sigma,
+        def target_log_prob_fn(sigma, ls_weight, ls_resid,
                                ensemble_resid,
                                *node_specific_positional_args):
             """Unnormalized target density as a function of states."""
@@ -290,8 +376,8 @@ if _FIT_MCMC_MODELS:
                              base_pred=base_test_pred,
                              family_tree=family_tree_dict,
                              y=y_test.squeeze(),
-                             ls_weight=DEFAULT_LOG_LS_WEIGHT,
-                             ls_resid=DEFAULT_LOG_LS_RESID,
+                             ls_weight=ls_weight,
+                             ls_resid=ls_resid,
                              sigma=sigma,
                              ensemble_resid=ensemble_resid,
                              **node_specific_kwargs)
@@ -302,6 +388,8 @@ if _FIT_MCMC_MODELS:
                             # tf.random_normal([N, K], stddev=0.01, name='init_ensemble_weight'),
                             # tf.random_normal([N], stddev=0.01, name='init_f_ensemble'),
                             tf.constant(0.1, name='init_sigma'),
+                            tf.constant(-1., name='init_ls_weight'),
+                            tf.constant(-1., name='init_ls_resid'),
                             tf.random_normal([N], stddev=0.01,
                                              name='init_ensemble_resid'),
                         ] + [
@@ -336,9 +424,10 @@ if _FIT_MCMC_MODELS:
             parallel_iterations=1
         )
 
-        sigma_sample, ensemble_resid_sample = state[:2]
-        temp_sample = state[2:2 + len(cond_weight_temp_names)]
-        weight_sample = state[2 + len(cond_weight_temp_names):]
+        (sigma_sample, ls_weight_sample,
+         ls_resid_sample, ensemble_resid_sample) = state[:4]
+        temp_sample = state[4:4 + len(cond_weight_temp_names)]
+        weight_sample = state[4 + len(cond_weight_temp_names):]
 
         # set up init op
         init_op = tf.global_variables_initializer()
@@ -350,6 +439,8 @@ if _FIT_MCMC_MODELS:
         init_op.run()
         [
             sigma_sample_val,
+            ls_weight_sample_val,
+            ls_resid_sample_val,
             temp_sample_val,
             resid_sample_val,
             weight_sample_val,
@@ -357,6 +448,8 @@ if _FIT_MCMC_MODELS:
         ] = sess.run(
             [
                 sigma_sample,
+                ls_weight_sample,
+                ls_resid_sample,
                 temp_sample,
                 ensemble_resid_sample,
                 weight_sample,
@@ -364,6 +457,9 @@ if _FIT_MCMC_MODELS:
             ])
         print('Acceptance Rate: {}'.format(np.mean(is_accepted_)))
         sess.close()
+
+    DEFAULT_LOG_LS_WEIGHT = np.median(ls_weight_sample_val)
+    DEFAULT_LOG_LS_RESID = np.median(ls_resid_sample_val)
 
     with open(os.path.join(_SAVE_ADDR_PREFIX,
                            '{}/sigma_sample.pkl'.format(family_name)), 'wb') as file:
@@ -377,6 +473,12 @@ if _FIT_MCMC_MODELS:
     with open(os.path.join(_SAVE_ADDR_PREFIX,
                            '{}/ensemble_resid_sample.pkl'.format(family_name)), 'wb') as file:
         pk.dump(resid_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_ls_weight_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ls_weight_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_ls_resid_sample.pkl'.format(family_name)), 'wb') as file:
+        pk.dump(ls_resid_sample_val, file, protocol=pk.HIGHEST_PROTOCOL)
 
     """ 2.3. prediction and visualization"""
 
@@ -514,7 +616,8 @@ visual_util.gpr_1d_visual(posterior_mean_mu,
                           pred_cov=posterior_mean_cov,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Mean, {}".format(family_name_full),
+                          rmse_id=calib_sample_id,
+                          title="Posterior Mean, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "{}/ensemble_posterior_mean.png".format(family_name))
                           )
@@ -524,7 +627,8 @@ visual_util.gpr_1d_visual(posterior_mean_median,
                           pred_quantiles=posterior_mean_quantiles,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Mean Quantiles, {}".format(family_name_full),
+                          rmse_id=calib_sample_id,
+                          title="Posterior Mean Quantiles, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "{}/ensemble_posterior_mean_quantile.png".format(family_name))
                           )
@@ -533,7 +637,8 @@ visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
                           pred_samples=list(ensemble_mean_val)[:2500],
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Samples, {}".format(family_name_full),
+                          rmse_id=calib_sample_id,
+                          title="Posterior Samples, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "{}/ensemble_posterior_sample.png".format(family_name))
                           )
@@ -555,7 +660,8 @@ visual_util.gpr_1d_visual(posterior_resid_mu,
                           pred_cov=posterior_resid_cov,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual, {}".format(family_name_full),
+                          rmse_id=calib_sample_id,
+                          title="Posterior Residual, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "{}/ensemble_posterior_resid.png".format(family_name))
                           )
@@ -565,7 +671,8 @@ visual_util.gpr_1d_visual(posterior_resid_median,
                           pred_quantiles=posterior_resid_quantiles,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual Quantiles, {}".format(family_name_full),
+                          rmse_id=calib_sample_id,
+                          title="Posterior Residual Quantiles, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "{}/ensemble_posterior_resid_quantile.png".format(family_name))
                           )
@@ -574,7 +681,8 @@ visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
                           pred_samples=list(ensemble_resid_valid_sample)[:2500],
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Residual Samples, {}".format(family_name_full),
+                          rmse_id=calib_sample_id,
+                          title="Posterior Residual Samples, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "{}/ensemble_posterior_resid_sample.png".format(family_name))
                           )
@@ -595,7 +703,8 @@ visual_util.gpr_1d_visual(posterior_dist_mu,
                           pred_cov=posterior_dist_cov,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Predictive, {}".format(family_name_full),
+                          rmse_id=calib_sample_id,
+                          title="Posterior Predictive, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "{}/ensemble_posterior_full.png".format(family_name))
                           )
@@ -605,7 +714,8 @@ visual_util.gpr_1d_visual(posterior_dist_median,
                           pred_quantiles=posterior_dist_quantiles,
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
+                          rmse_id=calib_sample_id,
+                          title="Posterior Predictive Quantiles, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "{}/ensemble_posterior_full_quantile.png".format(family_name))
                           )
@@ -613,7 +723,8 @@ visual_util.gpr_1d_visual(pred_mean=None, pred_cov=None, pred_quantiles=[],
                           pred_samples=list(ensemble_sample_val)[:2500],
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
-                          title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
+                          rmse_id=calib_sample_id,
+                          title="Posterior Predictive Samples, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "{}/ensemble_posterior_full_sample.png".format(family_name))
                           )
@@ -628,9 +739,10 @@ visual_util.gpr_1d_visual(pred_mean=posterior_dist_median,
                           ],
                           X_train=X_test, y_train=y_test,
                           X_test=X_valid, y_test=y_valid,
+                          rmse_id=calib_sample_id,
                           quantile_colors=["red", "black"],
                           quantile_alpha=0.2,
-                          title="Ensemble Posterior, Uncertainty Decomposition, {}".format(family_name_full),
+                          title="Posterior, Uncertainty Decomposition, {}".format(family_name_full),
                           save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                  "{}/ensemble_posterior_unc_decomp.png".format(family_name))
                           )
@@ -703,7 +815,7 @@ with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_valid_pred.pkl'), 'rb') as 
 """ 3.1. basic data/algorithm config"""
 
 X_induce = np.expand_dims(np.linspace(np.min(X_test),
-                                      np.max(X_test), 10), 1).astype(np.float32)
+                                      np.max(X_test), 20), 1).astype(np.float32)
 family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 
 n_inference_sample = 100
@@ -971,7 +1083,9 @@ for family_name in ["mfvi", "sgpr"]:
                               pred_cov=posterior_mean_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Mean, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+
+                              title="Posterior Mean, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_mean.png".format(family_name))
@@ -982,7 +1096,9 @@ for family_name in ["mfvi", "sgpr"]:
                               pred_quantiles=posterior_mean_quantiles,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Mean Quantiles, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+
+                              title="Posterior Mean Quantiles, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_mean_quantile.png".format(family_name))
@@ -992,7 +1108,9 @@ for family_name in ["mfvi", "sgpr"]:
                               pred_samples=list(ensemble_mean_val)[:2500],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Samples, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+
+                              title="Posterior Samples, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_sample.png".format(family_name))
@@ -1014,7 +1132,8 @@ for family_name in ["mfvi", "sgpr"]:
                               pred_cov=posterior_resid_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Residual, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Residual, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_resid.png".format(family_name))
@@ -1025,7 +1144,8 @@ for family_name in ["mfvi", "sgpr"]:
                               pred_quantiles=posterior_resid_quantiles,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Residual Quantiles, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Residual Quantiles, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_resid_quantile.png".format(family_name))
@@ -1035,7 +1155,8 @@ for family_name in ["mfvi", "sgpr"]:
                               pred_samples=list(ensemble_resid_valid_sample)[:2500],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Residual Samples, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Residual Samples, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_resid_sample.png".format(family_name))
@@ -1057,7 +1178,8 @@ for family_name in ["mfvi", "sgpr"]:
                               pred_cov=posterior_dist_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_full.png".format(family_name))
                               )
@@ -1067,7 +1189,8 @@ for family_name in ["mfvi", "sgpr"]:
                               pred_quantiles=posterior_dist_quantiles,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive Quantiles, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_full_quantile.png".format(family_name))
                               )
@@ -1075,7 +1198,8 @@ for family_name in ["mfvi", "sgpr"]:
                               pred_samples=list(ensemble_sample_val)[:2500],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive Samples, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_full_sample.png".format(family_name))
                               )
@@ -1090,9 +1214,10 @@ for family_name in ["mfvi", "sgpr"]:
                               ],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
+                              rmse_id=calib_sample_id,
                               quantile_colors=["red", "black"],
                               quantile_alpha=0.2,
-                              title="Ensemble Posterior, Uncertainty Decomposition, {}".format(family_name_full),
+                              title="Posterior, Uncertainty Decomposition, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_unc_decomp.png".format(family_name))
                               )
@@ -1430,7 +1555,9 @@ for family_name in ["mfvi_aug", "sgpr_aug"]:
                               pred_cov=posterior_mean_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Mean, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+
+                              title="Posterior Mean, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_mean.png".format(family_name))
@@ -1441,7 +1568,9 @@ for family_name in ["mfvi_aug", "sgpr_aug"]:
                               pred_quantiles=posterior_mean_quantiles,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Mean Quantiles, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+
+                              title="Posterior Mean Quantiles, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_mean_quantile.png".format(family_name))
@@ -1451,7 +1580,9 @@ for family_name in ["mfvi_aug", "sgpr_aug"]:
                               pred_samples=list(ensemble_mean_val)[:2500],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Samples, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+
+                              title="Posterior Samples, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_sample.png".format(family_name))
@@ -1474,7 +1605,7 @@ for family_name in ["mfvi_aug", "sgpr_aug"]:
                               pred_cov=posterior_resid_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Residual, {}".format(family_name_full),
+                              title="Posterior Residual, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_resid.png".format(family_name))
@@ -1485,7 +1616,7 @@ for family_name in ["mfvi_aug", "sgpr_aug"]:
                               pred_quantiles=posterior_resid_quantiles,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Residual Quantiles, {}".format(family_name_full),
+                              title="Posterior Residual Quantiles, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_resid_quantile.png".format(family_name))
@@ -1495,7 +1626,7 @@ for family_name in ["mfvi_aug", "sgpr_aug"]:
                               pred_samples=list(ensemble_resid_valid_sample)[:2500],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Residual Samples, {}".format(family_name_full),
+                              title="Posterior Residual Samples, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_resid_sample.png".format(family_name))
@@ -1517,7 +1648,9 @@ for family_name in ["mfvi_aug", "sgpr_aug"]:
                               pred_cov=posterior_dist_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+
+                              title="Posterior Predictive, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_full.png".format(family_name))
                               )
@@ -1527,7 +1660,8 @@ for family_name in ["mfvi_aug", "sgpr_aug"]:
                               pred_quantiles=posterior_dist_quantiles,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive Quantiles, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_full_quantile.png".format(family_name))
                               )
@@ -1535,7 +1669,8 @@ for family_name in ["mfvi_aug", "sgpr_aug"]:
                               pred_samples=list(ensemble_sample_val)[:2500],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive Samples, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_full_sample.png".format(family_name))
                               )
@@ -1550,9 +1685,10 @@ for family_name in ["mfvi_aug", "sgpr_aug"]:
                               ],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
+                              rmse_id=calib_sample_id,
                               quantile_colors=["red", "black"],
                               quantile_alpha=0.2,
-                              title="Ensemble Posterior, Uncertainty Decomposition, {}".format(family_name_full),
+                              title="Posterior, Uncertainty Decomposition, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_unc_decomp.png".format(family_name))
                               )
@@ -1605,7 +1741,7 @@ with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_valid_pred.pkl'), 'rb') as 
 """ 5.1. basic data/algorithm config"""
 
 X_induce = np.expand_dims(np.linspace(np.min(X_test),
-                                      np.max(X_test), 10), 1).astype(np.float32)
+                                      np.max(X_test), 20), 1).astype(np.float32)
 family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 
 n_inference_sample = 500  # number of samples to collect from variational family for approx inference
@@ -1888,7 +2024,8 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                               pred_cov=posterior_mean_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Mean, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Mean, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_mean.png".format(family_name))
@@ -1899,7 +2036,8 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                               pred_quantiles=posterior_mean_quantiles,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Mean Quantiles, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Mean Quantiles, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_mean_quantile.png".format(family_name))
@@ -1909,7 +2047,8 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                               pred_samples=list(ensemble_mean_val)[:2500],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Samples, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Samples, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_sample.png".format(family_name))
@@ -1932,7 +2071,8 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                               pred_cov=posterior_resid_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Residual, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Residual, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_resid.png".format(family_name))
@@ -1943,7 +2083,8 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                               pred_quantiles=posterior_resid_quantiles,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Residual Quantiles, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Residual Quantiles, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_resid_quantile.png".format(family_name))
@@ -1953,7 +2094,8 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                               pred_samples=list(ensemble_resid_valid_sample)[:2500],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Residual Samples, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Residual Samples, {}".format(family_name_full),
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "{}/ensemble_posterior_resid_sample.png".format(family_name))
@@ -1975,7 +2117,8 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                               pred_cov=posterior_dist_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_full.png".format(family_name))
                               )
@@ -1985,7 +2128,8 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                               pred_quantiles=posterior_dist_quantiles,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive Quantiles, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_full_quantile.png".format(family_name))
                               )
@@ -1993,7 +2137,8 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                               pred_samples=list(ensemble_sample_val)[:2500],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive Samples, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_full_sample.png".format(family_name))
                               )
@@ -2008,9 +2153,10 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
                               ],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
+                              rmse_id=calib_sample_id,
                               quantile_colors=["red", "black"],
                               quantile_alpha=0.2,
-                              title="Ensemble Posterior, Uncertainty Decomposition, {}".format(family_name_full),
+                              title="Posterior, Uncertainty Decomposition, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_unc_decomp.png".format(family_name))
                               )
@@ -2054,13 +2200,21 @@ for family_name in ["mfvi_crps", "sgpr_crps"]:
 """""""""""""""""""""""""""""""""
 # 6. Nonparametric Calibration I: Isotonic Regression
 """""""""""""""""""""""""""""""""
+family_names = []
+
+if _FIT_MCMC_MODELS:
+    family_names += ["hmc"]
+
+if _FIT_VI_MODELS:
+    family_names += ["mfvi", "sgpr"]
+
+if _FIT_AUG_VI_MODELS:
+    family_names += ["mfvi_aug", "sgpr_aug", "mfvi_crps", "sgpr_crps"]
 
 """ 6.1. prepare hyperparameters"""
 
 # load hyper-parameters
-for family_name in ["hmc", "mfvi", "sgpr",
-                    "mfvi_aug", "sgpr_aug",
-                    "mfvi_crps", "sgpr_crps"]:
+for family_name in family_names:
     family_name_root = family_name.split("_")[0]
     family_name_full = {"hmc": "Hamilton MC",
                         "mfvi": "Mean-field VI",
@@ -2150,7 +2304,8 @@ for family_name in ["hmc", "mfvi", "sgpr",
                               pred_cov=posterior_dist_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/calibration/ensemble_posterior_full_isoreg.png".format(
                                                          family_name))
@@ -2161,7 +2316,8 @@ for family_name in ["hmc", "mfvi", "sgpr",
                               pred_quantiles=posterior_dist_quantiles,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive Quantiles, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/calibration/ensemble_posterior_full_quantile_isoreg.png".format(
                                                          family_name))
@@ -2170,7 +2326,8 @@ for family_name in ["hmc", "mfvi", "sgpr",
                               pred_samples=list(ensemble_sample_calib_val)[:150],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive Samples, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/calibration/ensemble_posterior_full_sample_isoreg.png".format(
                                                          family_name))
@@ -2235,12 +2392,21 @@ for family_name in ["hmc", "mfvi", "sgpr",
 
 ADD_CONSTRAINT_POINT = True
 
+family_names = []
+
+if _FIT_MCMC_MODELS:
+    family_names += ["hmc"]
+
+if _FIT_VI_MODELS:
+    family_names += ["mfvi", "sgpr"]
+
+if _FIT_AUG_VI_MODELS:
+    family_names += ["mfvi_aug", "sgpr_aug", "mfvi_crps", "sgpr_crps"]
+
 """ 7.1. prepare hyperparameters """
 
 # load hyper-parameters
-for family_name in ["hmc", "mfvi", "sgpr",
-                    "mfvi_aug", "sgpr_aug",
-                    "mfvi_crps", "sgpr_crps"]:
+for family_name in family_names:
 
     family_name_root = family_name.split("_")[0]
     family_name_full = {"hmc": "Hamilton MC",
@@ -2535,7 +2701,8 @@ for family_name in ["hmc", "mfvi", "sgpr",
                               pred_cov=posterior_dist_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/calibration/ensemble_posterior_full_gpr.png".format(
                                                          family_name))
@@ -2546,7 +2713,8 @@ for family_name in ["hmc", "mfvi", "sgpr",
                               pred_quantiles=posterior_dist_quantiles,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
-                              title="Ensemble Posterior Predictive Quantiles, {}".format(family_name_full),
+                              rmse_id=calib_sample_id,
+                              title="Posterior Predictive Quantiles, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/calibration/ensemble_posterior_full_quantile_gpr.png".format(
                                                          family_name))
@@ -2555,8 +2723,9 @@ for family_name in ["hmc", "mfvi", "sgpr",
                               pred_samples=list(ensemble_sample_calib_val)[:150],
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
+                              rmse_id=calib_sample_id,
                               X_induce=X_valid[calib_train_id],
-                              title="Ensemble Posterior Predictive Samples, {}".format(family_name_full),
+                              title="Posterior Predictive Samples, {}".format(family_name_full),
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/calibration/ensemble_posterior_full_sample_gpr.png".format(
                                                          family_name))
