@@ -1,4 +1,4 @@
-"""Utility functions for calibration calibration."""
+"""Utility functions for calibration and evaluation metrics."""
 import tensorflow as tf
 import numpy as np
 
@@ -234,3 +234,48 @@ def monte_carlo_dual_expectation(f, samples_1, samples_2,
             dice = fx * tf.multiply(dice_exp_1, dice_exp_2)
 
             return tf.reduce_mean(dice, axis=axis)
+
+
+"""Standard evaluation metrics"""
+
+
+def rmse(y_obs, y_pred):
+    """Computes root mean square error."""
+    return np.sqrt(np.mean((y_obs - y_pred) ** 2))
+
+
+def rsqure(y_obs, y_pred):
+    """Computes Standardized R-square."""
+    nom = np.mean((y_obs - y_pred) ** 2)
+    denom = np.mean((y_obs - np.mean(y_obs)) ** 2)
+    return 1 - (nom / denom)
+
+
+def boot_sample(y_obs, y_pred, n_boot=1000, metric_func=rmse, seed=100):
+    """Computes bootstrap sample for given metric function.
+
+    Args:
+        y_obs: (np.ndarray) observation, shape (N_obs, )
+        y_pred: (np.ndarray) prediction, shape (N_obs, )
+        n_boot: (int) sample size
+        metric_func: (function) function that takes
+            y_obs, y_pred and return a scalar value.
+        seed: (int) random seed for bootstrap sampling.
+
+    Returns:
+        boot_mean, boot_sd (np.ndarray)
+            mean and standard dev of the boot sample.
+        boot_sample (np.ndarray) bootstrap samples, with size (n_boot, )
+    """
+    # sample
+    np.random.seed(seed)
+    N_obs = y_obs.size
+
+    boot_sample = []
+    for _ in range(n_boot):
+        boot_id = np.random.choice(range(N_obs), N_obs, replace=True)
+        boot_sample.append(metric_func(y_obs[boot_id], y_pred[boot_id]))
+
+    boot_sample = np.asarray(boot_sample)
+
+    return np.mean(boot_sample), np.std(boot_sample), boot_sample
