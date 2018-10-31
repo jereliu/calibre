@@ -21,7 +21,7 @@ def gpr_1d_visual(pred_mean,
                   compute_rmse=True, rmse_id=None,
                   quantile_colors=None, quantile_alpha=0.1,
                   y_range=[-4.5, 4.5], add_reference=False,
-                  title="", save_addr=""):
+                  title="", save_addr="", fontsize=12):
     """Plots the GP posterior predictive mean and uncertainty.
 
     Args:
@@ -41,6 +41,7 @@ def gpr_1d_visual(pred_mean,
             rmse on. If None then all X_test are used.
         title: (str) Title of the image.
         save_addr: (str) Address to save image to.
+        fontsize: (int) font size for title and axis labels
 
     Raises:
         (ValueError) If y_test is not multiple of X_test.
@@ -123,7 +124,7 @@ def gpr_1d_visual(pred_mean,
         for x_vertical in X_induce:
             plt.axvline(x=x_vertical, c='black', alpha=.2)
 
-    plt.title(title)
+    plt.title(title, fontsize=fontsize)
     if y_range is not None:
         plt.ylim(y_range)
 
@@ -138,7 +139,7 @@ def gpr_1d_visual(pred_mean,
 
 def gpr_2d_visual(pred_mean, pred_cov,
                   X_train, y_train, X_test, y_test,
-                  title="", save_addr=""):
+                  title="", save_addr="", fontsize=12):
     if save_addr:
         pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
         plt.ioff()
@@ -160,7 +161,7 @@ def gpr_2d_visual(pred_mean, pred_cov,
         rmse = metric_util.rmse(y_test, pred_mean)
         title = "{}, RMSE={:.4f}".format(title, rmse)
 
-    plt.title(title)
+    plt.title(title, fontsize=fontsize)
 
     if save_addr:
         plt.savefig(save_addr)
@@ -173,7 +174,8 @@ def plot_base_prediction(base_pred, model_names,
                          X_train=None, y_train=None,
                          X_test=None, y_test=None,
                          ax=None, y_range=[-4.5, 4.5],
-                         save_addr="", **kwargs):
+                         save_addr="", title_size=12, legend_size=12,
+                         **kwargs):
     if save_addr:
         pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
         plt.ioff()
@@ -205,8 +207,8 @@ def plot_base_prediction(base_pred, model_names,
 
     if y_range is not None:
         ax.set_ylim(y_range)
-    ax.set_title("Base Model Predictions")
-    ax.legend(loc='lower left')
+    ax.set_title("Base Model Predictions", fontsize=title_size)
+    ax.legend(loc='lower left', prop={'size': legend_size})
 
     if save_addr:
         plt.savefig(save_addr)
@@ -225,6 +227,7 @@ def plot_ensemble_weight_mean_1d(X, weight_sample, model_names="",
             dimension (N_sample, N_obs, num_models).
         model_names: (list of str) list of model names, dimension (num_models, ).
         save_addr_prefix: (str) Prefix for save address.
+        fontsize: (int) font size for title and axis labels
     """
     _, _, num_models = weight_sample.shape
 
@@ -329,7 +332,7 @@ def plot_ensemble_weight_mean_2d(X, weight_sample, model_names,
                           save_addr_prefix, model_names[k]))
 
 
-def prob_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
+def prob_calibration_1d(Y_obs, Y_sample, title="", save_addr="", fontsize=12):
     """Plots the reliability diagram (i.e. CDF for F^{-1}(y) ) for 1D prediction.
 
     Args:
@@ -338,6 +341,7 @@ def prob_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
         to the N observations. dim (N, M)
         title: (str) Title of the image.
         save_addr: (str) Address to save image to.
+        fontsize: (int) font size for title and axis labels
     """
 
     if save_addr:
@@ -355,9 +359,9 @@ def prob_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
     ax.plot(ecdf_eval, ecdf_valu)
     total_variation = np.mean(np.abs(ecdf_eval - ecdf_valu))
     plt.title("Reliability Index, {}, Score: {:.3f}".format(
-        title, total_variation))
-    plt.xlabel(r"Empirical CDF for $\hat{F}(Y_i|X_i)$", fontsize=12)
-    plt.ylabel("Expected CDF $Uniform(0, 1)$", fontsize=12)
+        title, total_variation), fontsize=fontsize)
+    plt.xlabel(r"Empirical CDF for $\hat{F}(Y_i|X_i)$", fontsize=fontsize)
+    plt.ylabel("Expected CDF $Uniform(0, 1)$", fontsize=fontsize)
 
     if save_addr:
         plt.savefig(save_addr)
@@ -365,7 +369,7 @@ def prob_calibration_1d(Y_obs, Y_sample, title="", save_addr=""):
         plt.ion()
 
 
-def coverage_index_1d(Y_obs, Y_sample, title="", save_addr=""):
+def coverage_index_1d(Y_obs, Y_sample, title="", save_addr="", fontsize=12):
     """Plots the reliability diagram (i.e. CDF for F^{-1}(y) ) for 1D prediction.
 
     Args:
@@ -374,6 +378,7 @@ def coverage_index_1d(Y_obs, Y_sample, title="", save_addr=""):
         to the N observations. dim (N_obs, N_sample)
         title: (str) Title of the image.
         save_addr: (str) Address to save image to.
+        fontsize: (int) font size for title and axis labels
     """
 
     if save_addr:
@@ -388,9 +393,9 @@ def coverage_index_1d(Y_obs, Y_sample, title="", save_addr=""):
     ax.plot(nom_coverage, obs_coverage)
     total_variation = np.mean(np.abs(obs_coverage - nom_coverage))
     plt.title("Coverage Index, {}, Score: {:.3f}".format(
-        title, total_variation))
-    plt.xlabel("Claimed Credible Interval Coverage", fontsize=12)
-    plt.ylabel("Observed Credible Interval Coverage", fontsize=12)
+        title, total_variation), fontsize=fontsize)
+    plt.xlabel("Claimed Credible Interval Coverage", fontsize=fontsize)
+    plt.ylabel("Observed Credible Interval Coverage", fontsize=fontsize)
 
     if save_addr:
         plt.savefig(save_addr)

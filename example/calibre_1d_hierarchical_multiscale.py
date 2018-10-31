@@ -27,6 +27,7 @@ from calibre.model import adaptive_ensemble
 from calibre.calibration import score
 
 import calibre.util.data as data_util
+import calibre.util.metric as metric_util
 import calibre.util.visual as visual_util
 import calibre.util.matrix as matrix_util
 import calibre.util.gp_flow as gpf_util
@@ -49,6 +50,7 @@ DEFAULT_LOG_LS_RESID = np.log(0.1).astype(np.float32)
 
 _FIT_BASE_MODELS = False
 _PLOT_COMPOSITION = False
+_FIT_ALT_MODELS = True
 _FIT_MAP_MODELS = False  # if true, then default_ls_weight will be replaced
 _FIT_MCMC_MODELS = False
 _FIT_VI_MODELS = False
@@ -156,25 +158,46 @@ for ens_name, ens_model in ens_model_list.items():
     family_name = ens_name
     family_name_full = ens_model.name
 
-    ens_model.train(X_test, y_test, base_test_pred)
-    y_valid_pred, y_valid_pred_se = (
-        ens_model.predict(X_valid, base_valid_pred))
+    if _FIT_ALT_MODELS:
+        ens_model.train(X_test, y_test, base_test_pred)
+        y_valid_pred, y_valid_pred_se = (
+            ens_model.predict(X_valid, base_valid_pred))
+
+        with open(os.path.join(_SAVE_ADDR_PREFIX,
+                               'other/ensemble_mean_{}.pkl'.format(family_name)), 'wb') as file:
+            pk.dump(y_valid_pred, file, protocol=pk.HIGHEST_PROTOCOL)
+        with open(os.path.join(_SAVE_ADDR_PREFIX,
+                               'other/ensemble_se_{}.pkl'.format(family_name)), 'wb') as file:
+            pk.dump(y_valid_pred_se, file, protocol=pk.HIGHEST_PROTOCOL)
 
     with open(os.path.join(_SAVE_ADDR_PREFIX,
-                           'other/ensemble_mean_{}.pkl'.format(family_name)), 'wb') as file:
-        pk.dump(y_valid_pred, file, protocol=pk.HIGHEST_PROTOCOL)
+                           'other/ensemble_mean_{}.pkl'.format(family_name)), 'rb') as file:
+        y_valid_pred = pk.load(file)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           'other/ensemble_se_{}.pkl'.format(family_name)), 'rb') as file:
+        y_valid_pred_se = pk.load(file)
 
     visual_util.gpr_1d_visual(y_valid_pred,
                               pred_cov=y_valid_pred_se,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
                               rmse_id=calib_sample_id,
-                              title="Posterior Predictive, {}".format(family_name_full),
+                              title="{}".format(family_name_full),
+                              fontsize=18,
                               save_addr=os.path.join(
                                   _SAVE_ADDR_PREFIX,
                                   "other/ensemble_posterior_{}.png".format(
-                                      family_name))
+                                      family_name)),
                               )
+
+    # compute quality metric
+    rmse_mean, rmse_std, rmse_sample = metric_util.boot_sample(
+        y_valid[calib_sample_id],
+        y_valid_pred[calib_sample_id], metric_func=metric_util.rmse)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           'other/ensemble_rmse_sample_{}_{:.4f}_{:4f}.pkl'.format(
+                               family_name, rmse_mean, rmse_std)), 'wb') as file:
+        pk.dump(rmse_sample, file, protocol=pk.HIGHEST_PROTOCOL)
 
     # if prob prediction, examine uncertainty quantification
     if y_valid_pred_se is not None:
@@ -673,6 +696,16 @@ posterior_dist_quantiles = [
     for q in [68, 95, 99]
 ]
 
+# compute quality metric
+rmse_mean, rmse_std, rmse_sample = metric_util.boot_sample(
+    y_valid[calib_sample_id],
+    posterior_dist_mu[calib_sample_id], metric_func=metric_util.rmse)
+with open(os.path.join(_SAVE_ADDR_PREFIX,
+                       '{}/ensemble_rmse_sample_{:.4f}_{:4f}.pkl'.format(
+                           family_name, rmse_mean, rmse_std)), 'wb') as file:
+    pk.dump(rmse_sample, file, protocol=pk.HIGHEST_PROTOCOL)
+
+# visualize prediction
 visual_util.gpr_1d_visual(posterior_dist_mu,
                           pred_cov=posterior_dist_cov,
                           X_train=X_test, y_train=y_test,
@@ -1041,6 +1074,7 @@ for family_name in ["mfvi", "sgpr"]:
         visual_util.plot_base_prediction(base_pred=base_pred_dict,
                                          model_names=ensemble_model_names,
                                          X_valid=X_valid, y_valid=y_valid,
+                                         title_size=16, legend_size=12,
                                          save_addr=os.path.join(
                                              _SAVE_ADDR_PREFIX,
                                              "{}/ensemble_base_model_fit_no_data.png".format(family_name)))
@@ -1138,7 +1172,6 @@ for family_name in ["mfvi", "sgpr"]:
                               )
 
     """ 3.5.5. visualize: ensemble posterior full """
-
     posterior_dist_mu = np.nanmean(ensemble_sample_val, axis=0)
     posterior_dist_cov = np.nanvar(ensemble_sample_val, axis=0)
 
@@ -1149,12 +1182,22 @@ for family_name in ["mfvi", "sgpr"]:
         for q in [68, 95, 99]
     ]
 
+    # compute quality metric
+    rmse_mean, rmse_std, rmse_sample = metric_util.boot_sample(
+        y_valid[calib_sample_id],
+        posterior_dist_mu[calib_sample_id], metric_func=metric_util.rmse)
+    with open(os.path.join(_SAVE_ADDR_PREFIX,
+                           '{}/ensemble_rmse_sample_{:.4f}_{:4f}.pkl'.format(
+                               family_name, rmse_mean, rmse_std)), 'wb') as file:
+        pk.dump(rmse_sample, file, protocol=pk.HIGHEST_PROTOCOL)
+
     visual_util.gpr_1d_visual(posterior_dist_mu,
                               pred_cov=posterior_dist_cov,
                               X_train=X_test, y_train=y_test,
                               X_test=X_valid, y_test=y_valid,
                               rmse_id=calib_sample_id,
-                              title="Posterior Predictive, {}".format(family_name_full),
+                              title="{}".format("Ours"),
+                              fontsize=18,
                               save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                                      "{}/ensemble_posterior_full.png".format(family_name))
                               )

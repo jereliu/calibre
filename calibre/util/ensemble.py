@@ -225,7 +225,7 @@ class ExpWeighting(EnsembleModel):
 
 class CVStacking(EnsembleModel):
     def __init__(self):
-        super().__init__("Cross-validated Convex Stacking")
+        super().__init__("Cross-validated Stacking")
         self.model_weight = None
 
     def train(self, X, y, base_pred):
