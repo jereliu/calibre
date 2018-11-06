@@ -50,12 +50,12 @@ DEFAULT_LOG_LS_RESID = np.log(0.1).astype(np.float32)
 
 _FIT_BASE_MODELS = False
 _PLOT_COMPOSITION = False
-_FIT_ALT_MODELS = True
+_FIT_ALT_MODELS = False
 _FIT_MAP_MODELS = False  # if true, then default_ls_weight will be replaced
-_FIT_MCMC_MODELS = False
-_FIT_VI_MODELS = False
+_FIT_MCMC_MODELS = True
+_FIT_VI_MODELS = True
 _FIT_AUG_VI_MODELS = False
-_FIT_CALIB_MODELS = False
+_FIT_CALIB_MODELS = True
 
 _EXAMPLE_DICTIONARY_SIMPLE = {
     "root": ["smooth",
@@ -85,6 +85,11 @@ _EXAMPLE_DICTIONARY_SIMPLE = {
              ]
 }
 
+_EXAMPLE_DICTIONARY_SIMPLE = {
+    "root": ["smooth", "complex"],
+    "smooth": ["rbf_0.2", "rbf_0.1"],
+    "complex": ["rbf_0.02", "rbf_0.01"],
+}
 """""""""""""""""""""""""""""""""
 # 0. Generate data
 """""""""""""""""""""""""""""""""
@@ -813,7 +818,8 @@ if _PLOT_COMPOSITION:
 """""""""""""""""""""""""""""""""
 # 3. Variational Inference
 """""""""""""""""""""""""""""""""
-DEFAULT_LOG_LS_WEIGHT = np.log(0.25).astype(np.float32)
+# DEFAULT_LOG_LS_WEIGHT = np.log(0.25).astype(np.float32)
+DEFAULT_LOG_LS_WEIGHT = np.log(0.075).astype(np.float32)
 DEFAULT_LOG_LS_RESID = np.log(0.05).astype(np.float32)
 
 with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_test_pred.pkl'), 'rb') as file:
@@ -830,7 +836,7 @@ family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 
 n_inference_sample = 100
 n_final_sample = 1000  # number of samples to collect from variational family
-max_steps = 25000  # number of training iterations
+max_steps = 50000  # number of training iterations
 
 for family_name in ["mfvi", "sgpr"]:
     if family_name == "mfvi":
@@ -2790,12 +2796,12 @@ for family_name in family_names:
 
     visual_util.prob_calibration_1d(
         y_calib, y_sample_calib,
-        title="Overall, {}".format(family_name_full),
+        title="Calibrated, {}".format(family_name_full),
         save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                "{}/calibration/gpr_calibration_prob_all.png".format(family_name)))
 
     visual_util.coverage_index_1d(
         y_calib, y_sample_calib,
-        title="Overall, {}".format(family_name_full),
+        title="Calibrated, {}".format(family_name_full),
         save_addr=os.path.join(_SAVE_ADDR_PREFIX,
                                "{}/calibration/gpr_credible_coverage_all.png".format(family_name)))
