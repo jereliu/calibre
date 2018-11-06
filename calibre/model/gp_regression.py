@@ -24,6 +24,8 @@ from tensorflow.python.ops.distributions.util import fill_triangular
 from calibre.util.matrix import replicate_along_zero_axis
 from calibre.model.gaussian_process import rbf
 
+import calibre.util.distribution as dist_util
+
 tfd = tfp.distributions
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -102,8 +104,8 @@ def model_mixture(X, ls=1., n_mix=2, ridge_factor=1e-3):
     return mix_prob, gp_f, sigma, y
 
 
-def model_mixture_adaptve(X, ls=1., n_mix=2, ridge_factor=1e-3):
-    """Defines the Daptive Mixture of Gaussian Process Model.
+def model_mixture_adaptive(X, ls=1., n_mix=2, ridge_factor=1e-3):
+    """Defines the Adaptive Mixture of Gaussian Process Model.
 
     Note: Currently this method is not tested and is likely to not
         work well due to explicit sampling of membership variables.
@@ -166,7 +168,7 @@ def model_mixture_adaptve(X, ls=1., n_mix=2, ridge_factor=1e-3):
     return gp_weight, mix_member, gp_comp, sigma, y
 
 
-def model_mixture_adaptve2(X, ls=1., n_mix=2, ridge_factor=1e-3):
+def model_mixture_adaptive2(X, ls=1., n_mix=2, ridge_factor=1e-3):
     """Alternative representation using Mixture family.
 
     Args:
@@ -354,6 +356,128 @@ def variational_sgpr(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
 
     return (q_f, q_sig, qf_mean, qf_cov,
             Sigma_pre, S, Kxx, Kxz, Kzz, Kzz_inv, Kxz_Kzz_inv)
+
+
+def variational_sgpr_sample(n_sample, qf_mean, qf_cov):
+    """Generates f samples from GPR mean-field variational family.
+
+    Args:
+        n_sample: (int) number of samples to draw
+        qf_mean: (tf.Tensor of float32) mean parameters for
+        variational family
+        qf_cov: (tf.Tensor of float32) covariance for
+        parameters for variational family
+
+    Returns:
+        (np.ndarray) sampled values.
+    """
+
+    """Generates f samples from GPR mean-field variational family."""
+    q_f = tfd.MultivariateNormalFullCovariance(loc=qf_mean,
+                                               covariance_matrix=qf_cov,
+                                               name='q_f')
+    return q_f.sample(n_sample)
+
+
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+""" Variational family III: Decoupled Gaussian Process """
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+"""Implements the Decoupled GP (DGP) VI method by [2].
+
+Select a set of inducing points Zm and Zs, then:
+
+Original posterior:
+p(Y, F, U) = p(Y|F) p(F|U) p(U), where:
+    p(Y|F) ~ MVN(Y| Mu =    F, 
+                    Sigma = s^2 * I)
+    p(F|U) ~ MVN(F| Mu =    Kxm Kmm^{-1} U 
+                    Sigma = Kxx - Kxs Kss^{-1} Kxs^T )
+    p(U)   ~ MVN(U| Mu = 0, Sigma = Kss)
+
+Variational posterior:
+    q(Y)   = p(Y|F)
+    q(F|U) = p(F|U)
+    q(U|m, S) ~ DGP
+
+Consequently, q(F) becomes 
+    q(F|m, S) ~ MVN(F| Mu =     Kxm m
+                       Sigma =  Kxx - Kxs (Kss + S^{-1})^{-1} Kxs^T)
+                       
+In practice, to make the problem unconstrained, we model S = LL^T.
+Then 
+
+    (Kss + S^{-1})^{-1} = L H^{-1} L^T,
+
+where H = I + L^T Kss L.
+"""
+
+
+def variational_dgpr(X, Zm, Zs, ls=1., kern_func=rbf, ridge_factor=1e-3):
+    """Defines the mean-field variational family for GPR.
+
+    Args:
+        X: (np.ndarray of float32) input training features, with dimension (Nx, D).
+        Zm: (np.ndarray of float32) inducing points for mean, shape (Nm, D).
+        Zs: (np.ndarray of float32) inducing points for covar, shape (Ns, D).
+        ls: (float32) length scale parameter.
+        kern_func: (function) kernel function.
+        ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition
+
+    Returns:
+        q_f, q_sig: (ed.RandomVariable) variational family.
+        q_f_mean, q_f_sdev: (tf.Variable) variational parameters for q_f
+    """
+    X = tf.convert_to_tensor(X)
+    Zm = tf.convert_to_tensor(Zm)
+    Zs = tf.convert_to_tensor(Zs)
+
+    Nx, Nm, Ns = X.shape.as_list()[0], Zm.shape.as_list()[0], Zs.shape.as_list()[0]
+
+    # 1. Prepare constants
+    # compute matrix constants
+    Kxx = kern_func(X, ls=ls)
+    Kmm = kern_func(Zm, ls=ls)
+    Kxm = kern_func(X, Zm, ls=ls)
+    Kxs = kern_func(X, Zs, ls=ls)
+    Kss = kern_func(Zs, ls=ls, ridge_factor=ridge_factor)
+
+    # 2. Define variational parameters
+    # define mean and variance for sigma
+    q_sig_mean = tf.get_variable(shape=[], name='q_sig_mean')
+    q_sig_sdev = tf.exp(tf.get_variable(shape=[], name='q_sig_sdev'))
+
+    # define free parameters (i.e. mean and full covariance of f_latent)
+    m = tf.get_variable(shape=[Nm, 1], name='qf_m')
+    s = tf.get_variable(shape=[Ns * (Ns + 1) / 2], name='qf_s')
+    L = fill_triangular(s, name='qf_chol')
+
+    # components for KL objective
+    H = tf.eye(Ns) + tf.matmul(L, tf.matmul(Kss, L), transpose_a=True)
+    cond_cov_inv = tf.matmul(L, tf.matrix_solve(H, tf.transpose(L)))
+
+    func_norm_mm = tf.matmul(m, tf.matmul(Kmm, m), transpose_a=True)
+    log_det_ss = tf.log(tf.matrix_determinant(H))
+    cond_norm_ss = tf.reduce_sum(tf.multiply(Kss, cond_cov_inv))
+
+    # compute sparse gp variational parameter (i.e. mean and covariance of P(f_obs | f_latent))
+    qf_mean = tf.tensordot(Kxm, m, [[1], [0]], name='qf_mean')
+    qf_cov = (Kxx -
+              tf.matmul(Kxs, tf.matmul(cond_cov_inv, Kxs, transpose_b=True)) +
+              ridge_factor * tf.eye(Nx, dtype=tf.float32)
+              )
+
+    # define variational family
+    q_f = dist_util.VariationalGaussianProcessDecoupled(loc=qf_mean,
+                                                        covariance_matrix=qf_cov,
+                                                        func_norm_mm=func_norm_mm,
+                                                        log_det_ss=log_det_ss,
+                                                        cond_norm_ss=cond_norm_ss,
+                                                        name='q_f')
+    q_sig = ed.Normal(loc=q_sig_mean,
+                      scale=q_sig_sdev, name='q_sig')
+
+    return q_f, q_sig, qf_mean, qf_cov
 
 
 def variational_sgpr_sample(n_sample, qf_mean, qf_cov):
