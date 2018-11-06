@@ -33,24 +33,30 @@ tfd = tfp.distributions
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
-def model(X, ls=1., ridge_factor=1e-4):
+def model(X, log_ls=0., ridge_factor=1e-4, sample_ls=False):
     """Defines the Gaussian Process Model.
 
     Args:
         X: (np.ndarray of float32) input training features.
         with dimension (N, D).
-        ls: (float32) length scale parameter.
+        log_ls: (float32) length scale parameter in log scale.
         ridge_factor: (float32) ridge factor to stabilize Cholesky decomposition.
+        sample_ls: (bool) Whether sample ls parameter.
 
     Returns:
          (tf.Tensors of float32) model parameters.
     """
-    N = X.shape[0]
+    X = tf.convert_to_tensor(X)
 
-    ls = ed.Normal(loc=-5., scale=1., name='ls')
+    N = X.shape.as_list()[0]
 
-    K_mat = rbf(X, ls=tf.exp(ls), ridge_factor=ridge_factor)
+    # specify kernel matrix
+    if sample_ls:
+        log_ls = ed.Normal(loc=-5., scale=1., name='ls')
 
+    K_mat = rbf(X, ls=tf.exp(log_ls), ridge_factor=ridge_factor)
+
+    # specify model parameters
     gp_f = ed.MultivariateNormalTriL(loc=tf.zeros(N),
                                      scale_tril=tf.cholesky(K_mat),
                                      name="gp_f")
@@ -60,7 +66,7 @@ def model(X, ls=1., ridge_factor=1e-4):
                                   scale_identity_multiplier=tf.exp(sigma),
                                   name="y")
 
-    return gp_f, sigma, y, ls
+    return y, gp_f, sigma, log_ls
 
 
 def model_mixture(X, ls=1., n_mix=2, ridge_factor=1e-3):
@@ -310,7 +316,10 @@ def variational_sgpr(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3):
         q_f, q_sig: (ed.RandomVariable) variational family.
         q_f_mean, q_f_sdev: (tf.Variable) variational parameters for q_f
     """
-    Nx, Nz = X.shape[0], Z.shape[0]
+    X = tf.convert_to_tensor(X)
+    Z = tf.convert_to_tensor(Z)
+
+    Nx, Nz = X.shape.as_list()[0], Z.shape.as_list()[0]
 
     # 1. Prepare constants
     # compute matrix constants
@@ -461,7 +470,7 @@ def variational_dgpr(X, Zm, Zs, ls=1., kern_func=rbf, ridge_factor=1e-3):
     cond_norm_ss = tf.reduce_sum(tf.multiply(Kss, cond_cov_inv))
 
     # compute sparse gp variational parameter (i.e. mean and covariance of P(f_obs | f_latent))
-    qf_mean = tf.tensordot(Kxm, m, [[1], [0]], name='qf_mean')
+    qf_mean = tf.squeeze(tf.tensordot(Kxm, m, [[1], [0]]), name='qf_mean')
     qf_cov = (Kxx -
               tf.matmul(Kxs, tf.matmul(cond_cov_inv, Kxs, transpose_b=True)) +
               ridge_factor * tf.eye(Nx, dtype=tf.float32)
@@ -480,22 +489,4 @@ def variational_dgpr(X, Zm, Zs, ls=1., kern_func=rbf, ridge_factor=1e-3):
     return q_f, q_sig, qf_mean, qf_cov
 
 
-def variational_sgpr_sample(n_sample, qf_mean, qf_cov):
-    """Generates f samples from GPR mean-field variational family.
-
-    Args:
-        n_sample: (int) number of samples to draw
-        qf_mean: (tf.Tensor of float32) mean parameters for
-        variational family
-        qf_cov: (tf.Tensor of float32) covariance for
-        parameters for variational family
-
-    Returns:
-        (np.ndarray) sampled values.
-    """
-
-    """Generates f samples from GPR mean-field variational family."""
-    q_f = tfd.MultivariateNormalFullCovariance(loc=qf_mean,
-                                               covariance_matrix=qf_cov,
-                                               name='q_f')
-    return q_f.sample(n_sample)
+variational_dgpr_sample = variational_sgpr_sample

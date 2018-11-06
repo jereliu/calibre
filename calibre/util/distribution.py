@@ -12,11 +12,13 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
+from tensorflow_probability.python.edward2.generated_random_variables import _make_random_variable
 from tensorflow_probability.python.distributions import mvn_linear_operator
 from tensorflow_probability.python.distributions import mvn_full_covariance
 
 
-class VariationalGaussianProcessDecoupled(mvn_full_covariance.MultivariateNormalFullCovariance):
+# distribution definition
+class VariationalGaussianProcessDecoupledDistribution(mvn_full_covariance.MultivariateNormalFullCovariance):
     """Variational Multivariate Normal under Decoupled Representation in [1]"""
 
     def __init__(self,
@@ -69,7 +71,7 @@ class VariationalGaussianProcessDecoupled(mvn_full_covariance.MultivariateNormal
         """
         parameters = dict(locals())
 
-        super(VariationalGaussianProcessDecoupled, self).__init__(
+        super(VariationalGaussianProcessDecoupledDistribution, self).__init__(
             loc=loc,
             covariance_matrix=covariance_matrix,
             validate_args=validate_args,
@@ -84,7 +86,7 @@ class VariationalGaussianProcessDecoupled(mvn_full_covariance.MultivariateNormal
 
 
 @tf.distributions.RegisterKL(mvn_linear_operator.MultivariateNormalLinearOperator,
-                             VariationalGaussianProcessDecoupled)
+                             VariationalGaussianProcessDecoupledDistribution)
 def _kl_brute_force(a, b, name=None):
     """Batched KL divergence `KL(a || b)` for decoupled GP in [1].
 
@@ -103,3 +105,8 @@ def _kl_brute_force(a, b, name=None):
             values=[b.func_norm_mm, b.log_det_ss, b.cond_norm_ss]):
         kl_div = 0.5 * (b.func_norm_mm + b.log_det_ss - b.cond_norm_ss)
         return kl_div
+
+
+# random variable definition
+VariationalGaussianProcessDecoupled = _make_random_variable(
+    VariationalGaussianProcessDecoupledDistribution)

@@ -544,8 +544,12 @@ variational_mfvi = functools.partial(variational_family,
                                      gp_vi_family=gp.variational_mfvi)
 variational_sgpr = functools.partial(variational_family,
                                      gp_vi_family=gp.variational_sgpr)
+variational_dgpr = functools.partial(variational_family,
+                                     gp_vi_family=gp.variational_dgpr)
 
 variational_mfvi_sample = functools.partial(variational_family_sample,
                                             gp_sample_func=gp.variational_mfvi_sample)
 variational_sgpr_sample = functools.partial(variational_family_sample,
                                             gp_sample_func=gp.variational_sgpr_sample)
+variational_dgpr_sample = functools.partial(variational_family_sample,
+                                            gp_sample_func=gp.variational_dgpr_sample)

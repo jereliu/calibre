@@ -98,7 +98,7 @@ N_train = 50
 N_test = 50
 N_valid = 500
 
-_SAVE_ADDR_PREFIX = "./result/calibre_1d_tree_multiscale"
+_SAVE_ADDR_PREFIX = "./result/calibre_1d_flat_multiscale"
 
 data_gen_func_list = [
     partial(data_util.sin_curve_1d, freq=(3, 6), x_rate=0.1),
@@ -830,15 +830,20 @@ with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_valid_pred.pkl'), 'rb') as 
 
 """ 3.1. basic data/algorithm config"""
 
-X_induce = np.expand_dims(np.linspace(np.min(X_test),
-                                      np.max(X_test), 20), 1).astype(np.float32)
 family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 
 n_inference_sample = 100
 n_final_sample = 1000  # number of samples to collect from variational family
 max_steps = 50000  # number of training iterations
 
-for family_name in ["mfvi", "sgpr"]:
+X_induce_mean = KMeans(n_clusters=50, random_state=100).fit(
+    X_test).cluster_centers_.astype(np.float32)
+X_induce = np.expand_dims(np.linspace(np.min(X_test),
+                                      np.max(X_test), 20), 1).astype(np.float32)
+
+for family_name in ["dgpr", "sgpr", "mfvi"]:
+    os.makedirs('{}/{}'.format(_SAVE_ADDR_PREFIX, family_name), exist_ok=True)
+
     if family_name == "mfvi":
         family_name_full = "Mean-field VI"
         ensemble_variational_family = adaptive_ensemble.variational_mfvi
@@ -847,11 +852,14 @@ for family_name in ["mfvi", "sgpr"]:
         family_name_full = "Sparse Gaussian Process"
         ensemble_variational_family = adaptive_ensemble.variational_sgpr
         ensemble_variational_family_sample = adaptive_ensemble.variational_sgpr_sample
+    elif family_name == "dgpr":
+        family_name_full = "Decoupled Gaussian Process"
+        ensemble_variational_family = adaptive_ensemble.variational_dgpr
+        ensemble_variational_family_sample = adaptive_ensemble.variational_dgpr_sample
 
     if _FIT_VI_MODELS:
         """ 3.2. Set up the computational graph """
         vi_graph = tf.Graph()
-
         with vi_graph.as_default():
             # sample from variational family
             (weight_gp_dict, resid_gp, temp_dict, sigma, _, _,  # variational RVs
@@ -861,6 +869,7 @@ for family_name in ["mfvi", "sgpr"]:
              sigma_mean, sigma_sdev,  # variational parameters, resid GP
              ) = ensemble_variational_family(X=X_test,
                                              Z=X_induce,
+                                             Zm=X_induce_mean,
                                              base_pred=base_test_pred,
                                              family_tree=family_tree_dict,
                                              log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
@@ -2425,7 +2434,7 @@ if _FIT_MCMC_MODELS:
     family_names += ["hmc"]
 
 if _FIT_VI_MODELS:
-    family_names += ["mfvi", "sgpr"]
+    family_names += ["mfvi", "sgpr", "dgpr"]
 
 if _FIT_AUG_VI_MODELS:
     family_names += ["mfvi_aug", "sgpr_aug", "mfvi_crps", "sgpr_crps"]

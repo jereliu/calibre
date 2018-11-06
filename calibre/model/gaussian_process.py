@@ -23,6 +23,8 @@ from tensorflow_probability import edward2 as ed
 
 from tensorflow.python.ops.distributions.util import fill_triangular
 
+import calibre.util.distribution as dist_util
+
 tfd = tfp.distributions
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -128,7 +130,7 @@ def prior(X, ls, kernel_func=rbf,
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
-def sample_posterior_mean(X_new, X, f_sample, ls, kern_func=rbf, ridge_factor=1e-3):
+def sample_posterior_mean(X_new, X, f_sample, ls, kernel_func=rbf, ridge_factor=1e-3):
     """Sample posterior mean for f^*.
 
     Posterior for f_new is conditionally independent from other parameters
@@ -143,14 +145,14 @@ def sample_posterior_mean(X_new, X, f_sample, ls, kern_func=rbf, ridge_factor=1e
         X: (np.ndarray of float) training locations, N x D
         f_sample: (np.ndarray of float) M samples of posterior GP sample, N x M
         ls: (float) training lengthscale
-        kern_func: (function) kernel function.
+        kernel_func: (function) kernel function.
         ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition.
 
     Returns:
         (np.ndarray) N_new x M vectors of posterior predictive mean samples
     """
-    Kx = kern_func(X, X_new, ls=ls)
-    K = kern_func(X, ls=ls, ridge_factor=ridge_factor)
+    Kx = kernel_func(X, X_new, ls=ls)
+    K = kernel_func(X, ls=ls, ridge_factor=ridge_factor)
     # add ridge factor to stabilize inversion.
     K_inv_f = tf.matrix_solve(K, f_sample)
     return tf.matmul(Kx, K_inv_f, transpose_a=True)
@@ -296,7 +298,8 @@ Consequently, U can be marginalized out, such that q(F) becomes
 """
 
 
-def variational_sgpr(X, Z, ls=1., kernel_func=rbf, ridge_factor=1e-3, name=""):
+def variational_sgpr(X, Z, ls=1., kernel_func=rbf,
+                     ridge_factor=1e-3, name="", **kwargs):
     """Defines the mean-field variational family for GPR.
 
     Args:
@@ -306,6 +309,8 @@ def variational_sgpr(X, Z, ls=1., kernel_func=rbf, ridge_factor=1e-3, name=""):
         kernel_func: (function) kernel function.
         ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition
         name: (str) name for the variational parameter/random variables.
+        kwargs: Dict of other keyword variables.
+            For compatibility purpose with other variational family.
 
     Returns:
         q_f, q_sig: (ed.RandomVariable) variational family.
@@ -371,3 +376,107 @@ def variational_sgpr_sample(n_sample, qf_mean, qf_cov):
     q_f = tfd.MultivariateNormalFullCovariance(loc=qf_mean,
                                                covariance_matrix=qf_cov)
     return q_f.sample(n_sample)
+
+
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+""" Variational family III: Decoupled Gaussian Process """
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+"""Implements the Decoupled GP (DGP) VI method by [2].
+
+Select a set of inducing points Zm and Zs, then:
+
+Original posterior:
+p(Y, F, U) = p(Y|F) p(F|U) p(U), where:
+    p(Y|F) ~ MVN(Y| Mu =    F, 
+                    Sigma = s^2 * I)
+    p(F|U) ~ MVN(F| Mu =    Kxm Kmm^{-1} U 
+                    Sigma = Kxx - Kxs Kss^{-1} Kxs^T )
+    p(U)   ~ MVN(U| Mu = 0, Sigma = Kss)
+
+Variational posterior:
+    q(Y)   = p(Y|F)
+    q(F|U) = p(F|U)
+    q(U|m, S) ~ DGP
+
+Consequently, q(F) becomes 
+    q(F|m, S) ~ MVN(F| Mu =     Kxm m
+                       Sigma =  Kxx - Kxs (Kss + S^{-1})^{-1} Kxs^T)
+
+In practice, to make the problem unconstrained, we model S = LL^T.
+Then 
+
+    (Kss + S^{-1})^{-1} = L H^{-1} L^T,
+
+where H = I + L^T Kss L.
+"""
+
+
+def variational_dgpr(X, Z, Zm=None, ls=1., kernel_func=rbf,
+                     ridge_factor=1e-3, name="", **kwargs):
+    """Defines the mean-field variational family for GPR.
+
+    Args:
+        X: (np.ndarray of float32) input training features, with dimension (Nx, D).
+        Z: (np.ndarray of float32) inducing points, shape (Ns, D).
+        Zm: (np.ndarray of float32 or None) inducing points for mean, shape (Nm, D).
+            If None then same as Z
+        ls: (float32) length scale parameter.
+        kernel_func: (function) kernel function.
+        ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition
+        name: (str) name for the variational parameter/random variables.
+        kwargs: Dict of other keyword variables.
+            For compatibility purpose with other variational family.
+
+    Returns:
+        q_f, q_sig: (ed.RandomVariable) variational family.
+        q_f_mean, q_f_sdev: (tf.Variable) variational parameters for q_f
+    """
+    X = tf.convert_to_tensor(X)
+    Zs = tf.convert_to_tensor(Z)
+    Zm = tf.convert_to_tensor(Zm) if Zm is not None else Zs
+
+    Nx, Nm, Ns = X.shape.as_list()[0], Zm.shape.as_list()[0], Zs.shape.as_list()[0]
+
+    # 1. Prepare constants
+    # compute matrix constants
+    Kxx = kernel_func(X, ls=ls)
+    Kmm = kernel_func(Zm, ls=ls)
+    Kxm = kernel_func(X, Zm, ls=ls)
+    Kxs = kernel_func(X, Zs, ls=ls)
+    Kss = kernel_func(Zs, ls=ls, ridge_factor=ridge_factor)
+
+    # 2. Define variational parameters
+    # define free parameters (i.e. mean and full covariance of f_latent)
+    m = tf.get_variable(shape=[Nm, 1], name='{}_mean_latent'.format(name))
+    s = tf.get_variable(shape=[Ns * (Ns + 1) / 2], name='{}_cov_latent_s'.format(name))
+    L = fill_triangular(s, name='{}_cov_latent_chol'.format(name))
+
+    # components for KL objective
+    H = tf.eye(Ns) + tf.matmul(L, tf.matmul(Kss, L), transpose_a=True)
+    cond_cov_inv = tf.matmul(L, tf.matrix_solve(H, tf.transpose(L)))
+
+    func_norm_mm = tf.matmul(m, tf.matmul(Kmm, m), transpose_a=True)
+    log_det_ss = tf.log(tf.matrix_determinant(H))
+    cond_norm_ss = tf.reduce_sum(tf.multiply(Kss, cond_cov_inv))
+
+    # compute sparse gp variational parameter (i.e. mean and covariance of P(f_obs | f_latent))
+    qf_mean = tf.squeeze(tf.tensordot(Kxm, m, [[1], [0]]), name='{}_mean'.format(name))
+    qf_cov = (Kxx -
+              tf.matmul(Kxs, tf.matmul(cond_cov_inv, Kxs, transpose_b=True)) +
+              ridge_factor * tf.eye(Nx, dtype=tf.float32)
+              )
+
+    # define variational family
+    q_f = dist_util.VariationalGaussianProcessDecoupled(loc=qf_mean,
+                                                        covariance_matrix=qf_cov,
+                                                        func_norm_mm=func_norm_mm,
+                                                        log_det_ss=log_det_ss,
+                                                        cond_norm_ss=cond_norm_ss,
+                                                        name=name)
+
+    return q_f, qf_mean, qf_cov
+
+
+variational_dgpr_sample = variational_sgpr_sample
+

@@ -122,7 +122,7 @@ def gpr_1d_visual(pred_mean,
                 markeredgecolor='black')
     if isinstance(X_induce, np.ndarray):
         for x_vertical in X_induce:
-            plt.axvline(x=x_vertical, c='black', alpha=.2)
+            plt.axvline(x=x_vertical, c='black', alpha=.05)
 
     plt.title(title, fontsize=fontsize)
     if y_range is not None:
