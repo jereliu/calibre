@@ -249,16 +249,19 @@ def variational_mfvi(X, name, **kwargs):
                                     scale_diag=qf_sdev,
                                     name=name)
 
-    return q_f, qf_mean, qf_sdev
+    mixture_par_list = []
+    return q_f, qf_mean, qf_sdev, mixture_par_list
 
 
-def variational_mfvi_sample(n_sample, qf_mean, qf_sdev):
+def variational_mfvi_sample(n_sample, qf_mean, qf_sdev, **kwargs):
     """Generates f samples from GPR mean-field variational family.
 
     Args:
         n_sample: (int) number of samples to draw
         qf_mean: (tf.Tensor of float32) mean parameters for variational family
         qf_sdev: (tf.Tensor of float32) standard deviation for variational family
+        kwargs: Dict of other keyword variables.
+            For compatibility purpose with other variational family.
 
     Returns:
          (np.ndarray) sampled values.
@@ -299,7 +302,8 @@ Consequently, U can be marginalized out, such that q(F) becomes
 
 
 def variational_sgpr(X, Z, ls=1., kernel_func=rbf,
-                     ridge_factor=1e-3, name="", **kwargs):
+                     ridge_factor=1e-3, mfvi_mixture=False,
+                     name="", **kwargs):
     """Defines the mean-field variational family for GPR.
 
     Args:
@@ -308,6 +312,8 @@ def variational_sgpr(X, Z, ls=1., kernel_func=rbf,
         ls: (float32) length scale parameter.
         kernel_func: (function) kernel function.
         ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition
+        mfvi_mixture: (float32) Whether to output variational family with a
+            mixture of MFVI.
         name: (str) name for the variational parameter/random variables.
         kwargs: Dict of other keyword variables.
             For compatibility purpose with other variational family.
@@ -351,31 +357,70 @@ def variational_sgpr(X, Z, ls=1., kernel_func=rbf,
               ridge_factor * tf.eye(Nx, dtype=tf.float32))
 
     # define variational family
-    q_f = ed.MultivariateNormalFullCovariance(loc=qf_mean,
-                                              covariance_matrix=qf_cov,
-                                              name=name)
+    # define variational family
+    mixture_par_list = []
+    if mfvi_mixture:
+        mixture_logits = tf.get_variable(name="{}_mixture_logits".format(name),
+                                         shape=[2])
+        qf_mean_mfvi = tf.get_variable(shape=[Nx], name='{}_mean_mfvi'.format(name))
+        qf_sdev_mfvi = tf.exp(tf.get_variable(shape=[Nx], name='{}_sdev_mfvi'.format(name)))
 
-    return q_f, qf_mean, qf_cov
+        mixture_par_list = [mixture_logits, qf_mean_mfvi, qf_sdev_mfvi]
+
+        q_f = ed.Mixture(
+            cat=tfd.Categorical(logits=mixture_logits),
+            components=[
+                tfd.MultivariateNormalDiag(loc=qf_mean_mfvi,
+                                           scale_diag=qf_sdev_mfvi),
+                tfd.MultivariateNormalFullCovariance(loc=qf_mean,
+                                                     covariance_matrix=qf_cov)],
+            name=name
+        )
+    else:
+        q_f = ed.MultivariateNormalFullCovariance(loc=qf_mean,
+                                                  covariance_matrix=qf_cov,
+                                                  name=name)
+
+    return q_f, qf_mean, qf_cov, mixture_par_list
 
 
-def variational_sgpr_sample(n_sample, qf_mean, qf_cov):
+def variational_sgpr_sample(n_sample, qf_mean, qf_cov,
+                            mfvi_mixture=False, mixture_par_list=None, **kwargs):
     """Generates f samples from GPR mean-field variational family.
 
     Args:
         n_sample: (int) number of samples to draw
         qf_mean: (tf.Tensor of float32) mean parameters for
-        variational family
-        qf_cov: (tf.Tensor of float32) covariance for
-        parameters for variational family
+            variational family
+        qf_cov: (tf.Tensor of float32) covariance for parameters for
+            variational family
+        mfvi_mixture: (bool) Whether to sample from a MFVI-SGP mixture
+        mixture_par_list: (list of np.ndarray) List of mixture distribution
+            parameters, containing [mixture_logits, qf_mean_mfvi, qf_sdev_mfvi].
+        kwargs: Dict of other keyword variables.
+            For compatibility purpose with other variational family.
 
     Returns:
         (np.ndarray) sampled values.
     """
-
-    """Generates f samples from GPR mean-field variational family."""
     q_f = tfd.MultivariateNormalFullCovariance(loc=qf_mean,
-                                               covariance_matrix=qf_cov)
-    return q_f.sample(n_sample)
+                                               covariance_matrix=qf_cov,
+                                               name='q_f')
+    q_f_sample = q_f.sample(n_sample)
+
+    if mfvi_mixture:
+        mixture_logits, mean_mfvi, sdev_mfvi = mixture_par_list
+        q_f_sample_mfvi = variational_mfvi_sample(n_sample=n_sample,
+                                                  qf_mean=mean_mfvi,
+                                                  qf_sdev=sdev_mfvi)
+
+        mix_prob = tf.nn.softmax(mixture_logits)
+
+        q_f_sample = tf.tensordot(
+            tf.stack([q_f_sample_mfvi, q_f_sample], axis=-1), mix_prob,
+            axes=[[-1], [0]])
+
+    return q_f_sample
 
 
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -413,7 +458,8 @@ where H = I + L^T Kss L.
 
 
 def variational_dgpr(X, Z, Zm=None, ls=1., kernel_func=rbf,
-                     ridge_factor=1e-3, name="", **kwargs):
+                     ridge_factor=1e-3, mfvi_mixture=False,
+                     name="", **kwargs):
     """Defines the mean-field variational family for GPR.
 
     Args:
@@ -424,6 +470,8 @@ def variational_dgpr(X, Z, Zm=None, ls=1., kernel_func=rbf,
         ls: (float32) length scale parameter.
         kernel_func: (function) kernel function.
         ridge_factor: (float32) small ridge factor to stabilize Cholesky decomposition
+        mfvi_mixture: (float32) Whether to output variational family with a
+            mixture of MFVI.
         name: (str) name for the variational parameter/random variables.
         kwargs: Dict of other keyword variables.
             For compatibility purpose with other variational family.
@@ -467,16 +515,37 @@ def variational_dgpr(X, Z, Zm=None, ls=1., kernel_func=rbf,
               ridge_factor * tf.eye(Nx, dtype=tf.float32)
               )
 
-    # define variational family
-    q_f = dist_util.VariationalGaussianProcessDecoupled(loc=qf_mean,
-                                                        covariance_matrix=qf_cov,
-                                                        func_norm_mm=func_norm_mm,
-                                                        log_det_ss=log_det_ss,
-                                                        cond_norm_ss=cond_norm_ss,
-                                                        name=name)
+    # 3. Define variational family
+    mixture_par_list = []
+    if mfvi_mixture:
+        mixture_logits = tf.get_variable(name="{}_mixture_logits".format(name),
+                                         shape=[2])
+        qf_mean_mfvi = tf.get_variable(shape=[Nx], name='{}_mean_mfvi'.format(name))
+        qf_sdev_mfvi = tf.exp(tf.get_variable(shape=[Nx], name='{}_sdev_mfvi'.format(name)))
 
-    return q_f, qf_mean, qf_cov
+        mixture_par_list = [mixture_logits, qf_mean_mfvi, qf_sdev_mfvi]
+
+        q_f = ed.Mixture(
+            cat=tfd.Categorical(logits=mixture_logits),
+            components=[
+                tfd.MultivariateNormalDiag(loc=qf_mean_mfvi,
+                                           scale_diag=qf_sdev_mfvi),
+                dist_util.VariationalGaussianProcessDecoupledDistribution(
+                    loc=qf_mean,
+                    covariance_matrix=qf_cov,
+                    func_norm_mm=func_norm_mm,
+                    log_det_ss=log_det_ss,
+                    cond_norm_ss=cond_norm_ss)],
+            name=name)
+    else:
+        q_f = dist_util.VariationalGaussianProcessDecoupled(loc=qf_mean,
+                                                            covariance_matrix=qf_cov,
+                                                            func_norm_mm=func_norm_mm,
+                                                            log_det_ss=log_det_ss,
+                                                            cond_norm_ss=cond_norm_ss,
+                                                            name=name)
+
+    return q_f, qf_mean, qf_cov, mixture_par_list
 
 
 variational_dgpr_sample = variational_sgpr_sample
-

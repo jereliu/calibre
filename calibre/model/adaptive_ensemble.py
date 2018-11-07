@@ -442,7 +442,7 @@ def variational_family(X, base_pred, log_ls_weight=None, log_ls_resid=None, fami
         sigma_mean: (tf.Variable) Variational parameters for the mean of obs noise.
         sigma_sdev: (tf.Variable) Variational parameters for the stddev of obs noise.
     """
-    # lengthscale parameters
+    # length-scale parameters
     if log_ls_weight is None:
         log_ls_weight, ls_weight_mean, ls_weight_sdev = (
             inference_util.scalar_gaussian_variational(name='ls_weight'))
@@ -458,17 +458,18 @@ def variational_family(X, base_pred, log_ls_weight=None, log_ls_resid=None, fami
     # temperature and base_weight gps
     (weight_gp_dict, temp_dict,
      weight_gp_mean_dict, weight_gp_vcov_dict,
-     temp_mean_dict, temp_sdev_dict,) = (
+     temp_mean_dict, temp_sdev_dict,
+     mixture_par_dict,) = (
         tail_free.variational_family(X, base_pred,
                                      family_tree=family_tree,
                                      gp_vi_family=gp_vi_family,
                                      ls=tf.exp(log_ls_weight), **kwargs))
 
     # residual gp
-    resid_gp, resid_gp_mean, resid_gp_vcov = gp_vi_family(X,
-                                                          ls=tf.exp(log_ls_resid),
-                                                          name='vi_ensemble_resid',
-                                                          **kwargs)
+    (resid_gp, resid_gp_mean, resid_gp_vcov,
+     mixture_par_resid,) = gp_vi_family(X, ls=tf.exp(log_ls_resid),
+                                        name='vi_ensemble_resid',
+                                        **kwargs)
 
     # observation noise
     sigma, sigma_mean, sigma_sdev = inference_util.scalar_gaussian_variational(name='sigma')
@@ -479,12 +480,18 @@ def variational_family(X, base_pred, log_ls_weight=None, log_ls_resid=None, fami
             resid_gp_mean, resid_gp_vcov,  # resid GP
             temp_mean_dict, temp_sdev_dict,  # temperature
             sigma_mean, sigma_sdev,  # obs noise
-    )
+            mixture_par_dict, mixture_par_resid,  # mixture parameters
+            )
 
 
-def variational_family_sample(n_sample, weight_gp_mean_dict, weight_gp_vcov_dict, temp_mean_dict, temp_sdev_dict,
-                              resid_gp_mean, resid_gp_vcov, sigma_mean, sigma_sdev, log_ls_weight_mean,
-                              log_ls_weight_sdev, log_ls_resid_mean, log_ls_resid_sdev,
+def variational_family_sample(n_sample,
+                              weight_gp_mean_dict, weight_gp_vcov_dict,
+                              temp_mean_dict, temp_sdev_dict, mixture_par_dict,
+                              resid_gp_mean, resid_gp_vcov, mixture_par_resid,
+                              sigma_mean, sigma_sdev,
+                              log_ls_weight_mean, log_ls_weight_sdev,
+                              log_ls_resid_mean, log_ls_resid_sdev,
+                              mfvi_mixture=False,
                               gp_sample_func=gp.variational_mfvi_sample):
     """Samples from the variational family for adaptive ensemble.
 
@@ -498,16 +505,21 @@ def variational_family_sample(n_sample, weight_gp_mean_dict, weight_gp_vcov_dict
             the mean of temperature parameters.
         temp_sdev_dict: (dict of np.ndarray) Dictionary of variational parameters for
             the stddev of temperature parameters.
+        mixture_par_dict: (dict of list) Dictionary of list of mixture parameters for
+            SGP-MFVI mixture [mixture_logits, qf_mean_mfvi, qf_sdev_mfvi].
         resid_gp_mean: (np.ndarray of float32) Dictionary of variational parameters for
             the mean of residual GP.
         resid_gp_vcov: (np.ndarray of float32) Dictionary of variational parameters for
             the stddev or covariance matrix of residual GP.
+        mixture_par_resid: (list of np.ndarray) List of mixture parameters for
+            SGP-MFVI mixture [mixture_logits, qf_mean_mfvi, qf_sdev_mfvi].
         sigma_mean: (float32) Variational parameters for the mean of obs noise.
         sigma_sdev: (float32) Variational parameters for the stddev of obs noise.
         log_ls_weight_mean: (float32) Variational parameters for the mean of ls_weight.
         log_ls_weight_sdev: (float32) Variational parameters for the stddev of ls_weight.
         log_ls_resid_mean: (float32) Variational parameters for the mean of ls_resid.
         log_ls_resid_sdev: (float32) Variational parameters for the stddev of ls_resid.
+        mfvi_mixture: (bool) Whether the family is a GP-MF mixture.
         gp_sample_func: (function): Sampling function for Gaussian Process variational family.
 
     Returns:
@@ -520,13 +532,16 @@ def variational_family_sample(n_sample, weight_gp_mean_dict, weight_gp_vcov_dict
     """
     # sample model weight gp and temperature.
     weight_gp_sample_dict, temp_sample_dict = (
-        tail_free.variational_family_sample(n_sample,
+        tail_free.variational_family_sample(n_sample, mfvi_mixture,
                                             weight_gp_mean_dict, weight_gp_vcov_dict,
                                             temp_mean_dict, temp_sdev_dict,
+                                            mixture_par_dict=mixture_par_dict,
                                             gp_sample_func=gp_sample_func))
 
     # sample residual process gp
-    resid_gp_sample = gp_sample_func(n_sample, resid_gp_mean, resid_gp_vcov)
+    resid_gp_sample = gp_sample_func(n_sample, resid_gp_mean, resid_gp_vcov,
+                                     mfvi_mixture=mfvi_mixture,
+                                     mixture_par_list=mixture_par_resid)
 
     # sample observational noise
     sigma_sample = inference_util.scalar_gaussian_variational_sample(

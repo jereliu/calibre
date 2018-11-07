@@ -52,7 +52,7 @@ _FIT_BASE_MODELS = False
 _PLOT_COMPOSITION = False
 _FIT_ALT_MODELS = False
 _FIT_MAP_MODELS = False  # if true, then default_ls_weight will be replaced
-_FIT_MCMC_MODELS = True
+_FIT_MCMC_MODELS = False
 _FIT_VI_MODELS = True
 _FIT_AUG_VI_MODELS = False
 _FIT_CALIB_MODELS = True
@@ -78,6 +78,13 @@ _EXAMPLE_DICTIONARY_SIMPLE = {
 }
 
 _EXAMPLE_DICTIONARY_SIMPLE = {
+    "root": ["smooth", "complex"],
+    "smooth": ["rbf_0.2", "rbf_0.1"],
+    "complex": ["rbf_0.02", "rbf_0.01"],
+}
+
+
+_EXAMPLE_DICTIONARY_SIMPLE = {
     "root": ["rbf_0.2",
              "rbf_0.1",
              "rbf_0.02",
@@ -85,11 +92,6 @@ _EXAMPLE_DICTIONARY_SIMPLE = {
              ]
 }
 
-_EXAMPLE_DICTIONARY_SIMPLE = {
-    "root": ["smooth", "complex"],
-    "smooth": ["rbf_0.2", "rbf_0.1"],
-    "complex": ["rbf_0.02", "rbf_0.01"],
-}
 """""""""""""""""""""""""""""""""
 # 0. Generate data
 """""""""""""""""""""""""""""""""
@@ -818,7 +820,9 @@ if _PLOT_COMPOSITION:
 """""""""""""""""""""""""""""""""
 # 3. Variational Inference
 """""""""""""""""""""""""""""""""
-# DEFAULT_LOG_LS_WEIGHT = np.log(0.25).astype(np.float32)
+_ADD_MFVI_MIXTURE = True
+_N_INFERENCE_SAMPLE = 50
+
 DEFAULT_LOG_LS_WEIGHT = np.log(0.075).astype(np.float32)
 DEFAULT_LOG_LS_RESID = np.log(0.05).astype(np.float32)
 
@@ -832,16 +836,20 @@ with open(os.path.join(_SAVE_ADDR_PREFIX, 'base/base_valid_pred.pkl'), 'rb') as 
 
 family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 
-n_inference_sample = 100
 n_final_sample = 1000  # number of samples to collect from variational family
-max_steps = 50000  # number of training iterations
+max_steps = 100000  # number of training iterations
 
-X_induce_mean = KMeans(n_clusters=50, random_state=100).fit(
-    X_test).cluster_centers_.astype(np.float32)
+# X_induce_mean = KMeans(n_clusters=50, random_state=100).fit(
+#     X_test).cluster_centers_.astype(np.float32)
+X_induce_mean = np.expand_dims(np.linspace(np.min(X_test),
+                                           np.max(X_test), 50), 1).astype(np.float32)
 X_induce = np.expand_dims(np.linspace(np.min(X_test),
                                       np.max(X_test), 20), 1).astype(np.float32)
 
-for family_name in ["dgpr", "sgpr", "mfvi"]:
+for family_name in ["dgpr", "sgpr"]:
+    if _ADD_MFVI_MIXTURE:
+        family_name = "{}_mfvi_mix".format(family_name)
+
     os.makedirs('{}/{}'.format(_SAVE_ADDR_PREFIX, family_name), exist_ok=True)
 
     if family_name == "mfvi":
@@ -867,6 +875,7 @@ for family_name in ["dgpr", "sgpr", "mfvi"]:
              resid_gp_mean, resid_gp_vcov,  # resid GP variational parameters
              temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
              sigma_mean, sigma_sdev,  # variational parameters, resid GP
+             mixture_par_dict, mixture_par_resid,  # mixture parameters
              ) = ensemble_variational_family(X=X_test,
                                              Z=X_induce,
                                              Zm=X_induce_mean,
@@ -875,7 +884,8 @@ for family_name in ["dgpr", "sgpr", "mfvi"]:
                                              log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
                                              log_ls_resid=DEFAULT_LOG_LS_RESID,
                                              kernel_func=gp.rbf,
-                                             ridge_factor=1e-3)
+                                             ridge_factor=1e-3,
+                                             mfvi_mixture=_ADD_MFVI_MIXTURE)
 
             # assemble kwargs for make_value_setter
             variational_rv_dict = {"ensemble_resid": resid_gp, "sigma": sigma, }
@@ -896,10 +906,17 @@ for family_name in ["dgpr", "sgpr", "mfvi"]:
             # compute the KL divergence
             kl = 0.
             for rv_name, variational_rv in variational_rv_dict.items():
-                kl += tf.reduce_sum(
-                    variational_rv.distribution.kl_divergence(
+                if _ADD_MFVI_MIXTURE:
+                    # compute MC approximation
+                    param_approx_sample = variational_rv.distribution.sample(_N_INFERENCE_SAMPLE)
+                    param_kl = (variational_rv.distribution.log_prob(param_approx_sample) -
+                                model_tape[rv_name].distribution.log_prob(param_approx_sample))
+                else:
+                    # compute analytical form
+                    param_kl = variational_rv.distribution.kl_divergence(
                         model_tape[rv_name].distribution)
-                )
+
+                kl += tf.reduce_sum(param_kl)
 
             # define loss op: ELBO = E_q(p(x|z)) + KL(q || p)
             elbo = tf.reduce_mean(log_likelihood - kl)
@@ -914,7 +931,6 @@ for family_name in ["dgpr", "sgpr", "mfvi"]:
             vi_graph.finalize()
 
         """ 3.3. execute optimization, then sample from variational family """
-
         with tf.Session(graph=vi_graph) as sess:
             start_time = time.time()
 
@@ -930,11 +946,14 @@ for family_name in ["dgpr", "sgpr", "mfvi"]:
             (weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
              resid_gp_mean_val, resid_gp_vcov_val,
              temp_mean_dict_val, temp_sdev_dict_val,
-             sigma_mean_val, sigma_sdev_val) = sess.run([
+             sigma_mean_val, sigma_sdev_val,
+             mixture_par_dict_val, mixture_par_resid_val
+             ) = sess.run([
                 weight_gp_mean_dict, weight_gp_vcov_dict,
                 resid_gp_mean, resid_gp_vcov,
                 temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
-                sigma_mean, sigma_sdev])
+                sigma_mean, sigma_sdev,
+                mixture_par_dict, mixture_par_resid])
 
             sess.close()
 
@@ -944,13 +963,14 @@ for family_name in ["dgpr", "sgpr", "mfvi"]:
                 ensemble_variational_family_sample(
                     n_final_sample,
                     weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
-                    temp_mean_dict_val, temp_sdev_dict_val,
-                    resid_gp_mean_val, resid_gp_vcov_val,
+                    temp_mean_dict_val, temp_sdev_dict_val, mixture_par_dict_val,
+                    resid_gp_mean_val, resid_gp_vcov_val, mixture_par_resid_val,
                     sigma_mean_val, sigma_sdev_val,
                     log_ls_weight_mean=DEFAULT_LOG_LS_WEIGHT,
                     log_ls_weight_sdev=.01,
                     log_ls_resid_mean=DEFAULT_LOG_LS_WEIGHT,
-                    log_ls_resid_sdev=.01
+                    log_ls_resid_sdev=.01,
+                    mfvi_mixture=_ADD_MFVI_MIXTURE,
                 ))
 
             (weight_gp_sample_dict_val, temp_sample_dict_val,
@@ -2242,7 +2262,8 @@ if _FIT_MCMC_MODELS:
     family_names += ["hmc"]
 
 if _FIT_VI_MODELS:
-    family_names += ["mfvi", "sgpr"]
+    family_names += ["mfvi", "sgpr", "dgpr",
+                     "sgpr_mfvi_mix", "dgpr_mfvi_mix"]
 
 if _FIT_AUG_VI_MODELS:
     family_names += ["mfvi_aug", "sgpr_aug", "mfvi_crps", "sgpr_crps"]
@@ -2252,7 +2273,8 @@ for family_name in family_names:
     family_name_root = family_name.split("_")[0]
     family_name_full = {"hmc": "Hamilton MC",
                         "mfvi": "Mean-field VI",
-                        "sgpr": "Sparse Gaussian Process"
+                        "sgpr": "Sparse Gaussian Process",
+                        "dgpr": "Decoupled Gaussian Process"
                         }[family_name_root]
 
     os.makedirs("{}/{}".format(_SAVE_ADDR_PREFIX, family_name), exist_ok=True)
@@ -2434,7 +2456,8 @@ if _FIT_MCMC_MODELS:
     family_names += ["hmc"]
 
 if _FIT_VI_MODELS:
-    family_names += ["mfvi", "sgpr", "dgpr"]
+    family_names += ["mfvi", "sgpr", "dgpr",
+                     "sgpr_mfvi_mix", "dgpr_mfvi_mix"]
 
 if _FIT_AUG_VI_MODELS:
     family_names += ["mfvi_aug", "sgpr_aug", "mfvi_crps", "sgpr_crps"]
@@ -2445,7 +2468,8 @@ for family_name in family_names:
     family_name_root = family_name.split("_")[0]
     family_name_full = {"hmc": "Hamilton MC",
                         "mfvi": "Mean-field VI",
-                        "sgpr": "Sparse Gaussian Process"
+                        "sgpr": "Sparse Gaussian Process",
+                        "dgpr": "Decoupled Gaussian Process"
                         }[family_name_root]
 
     os.makedirs("{}/{}".format(_SAVE_ADDR_PREFIX, family_name), exist_ok=True)

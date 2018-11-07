@@ -445,25 +445,30 @@ def variational_family(X, base_pred, family_tree=None,
                          for name in get_nonroot_node_names(family_tree)]
     base_weight_list = [list(gp_vi_family(X, name='vi_{}'.format(weight_name), **kwargs))
                         for weight_name in base_weight_names]
-    base_weight_arr = np.asarray(base_weight_list).T
+    base_weight_arr = np.asarray([weight_par[:-1] for weight_par in base_weight_list]).T
+    mixture_par_arr = [weight_par[-1] for weight_par in base_weight_list]
 
+    # prepare outcome containers
     weight_gp_dict = dict(zip(base_weight_names, base_weight_arr[0]))
     weight_gp_mean_dict = dict(zip(base_weight_names, base_weight_arr[1]))
     weight_gp_vcov_dict = dict(zip(base_weight_names, base_weight_arr[2]))
+    mixture_par_dict = dict(zip(base_weight_names, mixture_par_arr))
 
     return (weight_gp_dict, temp_dict,
             weight_gp_mean_dict, weight_gp_vcov_dict,
-            temp_mean_dict, temp_sdev_dict)
+            temp_mean_dict, temp_sdev_dict,
+            mixture_par_dict,)
 
 
-def variational_family_sample(n_sample,
+def variational_family_sample(n_sample, mfvi_mixture,
                               weight_gp_mean_dict, weight_gp_vcov_dict,
-                              temp_mean_dict, temp_sdev_dict,
+                              temp_mean_dict, temp_sdev_dict, mixture_par_dict,
                               gp_sample_func=gp.variational_mfvi_sample):
     """Samples from the variational family for tail-free process prior.
 
     Args:
         n_sample: (int) Number of samples to draw from variational family.
+        mfvi_mixture: (bool) Whether the family is a GP-MF mixture.
         weight_gp_mean_dict: (dict of tf.Variable) Dictionary of variational parameters
             for the mean of GP.
         weight_gp_vcov_dict: (dict of tf.Variable) Dictionary of variational parameters
@@ -497,7 +502,10 @@ def variational_family_sample(n_sample,
         weight_gp_sample_dict[model_names] = gp_sample_func(
             n_sample,
             weight_gp_mean_dict[model_names],
-            weight_gp_vcov_dict[model_names])
+            weight_gp_vcov_dict[model_names],
+            mfvi_mixture=mfvi_mixture,
+            mixture_par_list=mixture_par_dict[model_names]
+        )
 
     # sample temperature.
     temp_sample_dict = dict()

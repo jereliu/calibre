@@ -277,39 +277,55 @@ gpr_1d_visual(mu, cov,
 """""""""""""""""""""""""""""""""
 # 4. Sparse GP (Structured VI)
 """""""""""""""""""""""""""""""""
+_ADD_MFVI_MIXTURE = False
+_N_INFERENCE_SAMPLE = 50
+_N_POSTERIOR_SAMPLE = 10000
 
 """ 4.1. Set up the computational graph """
-sgp_graph = tf.Graph()
+# X_induce = np.linspace(np.min(X_train), np.max(X_train), num=15)
+# X_induce = np.expand_dims(X_induce, -1).astype(np.float32)
+
 X_induce = KMeans(n_clusters=15, random_state=100).fit(
     X_train).cluster_centers_.astype(np.float32)
 
+sgp_graph = tf.Graph()
 with sgp_graph.as_default():
     # sample from variational family
 
-    (q_f, q_sig, qf_mean, qf_cov,
-     Sigma_pre, S, Kxx, Kxz,
-     Kzz, Kzz_inv, Kxz_Kzz_inv) = (
+    q_f, q_sig, qf_mean, qf_cov, mixture_par_list = (
         gp_regression.variational_sgpr(X=X_train,
                                        Z=X_induce,
-                                       ls=np.exp(_DEFAULT_LOG_LS_SCALE))
+                                       ls=np.exp(_DEFAULT_LOG_LS_SCALE),
+                                       mfvi_mixture=_ADD_MFVI_MIXTURE)
     )
 
     # compute the expected predictive log-likelihood
     with ed.tape() as model_tape:
         with ed.interception(make_value_setter(gp_f=q_f, sigma=q_sig)):
-            y, _, _, _ = gp_regression.model(X=X_train,
-                                             log_ls=_DEFAULT_LOG_LS_SCALE,
-                                             ridge_factor=1e-3)
+            y, gp_f, sigma, _ = gp_regression.model(X=X_train,
+                                                    log_ls=_DEFAULT_LOG_LS_SCALE,
+                                                    ridge_factor=1e-4)
 
     log_likelihood = y.distribution.log_prob(y_train)
 
     # compute the KL divergence
-    kl = 0.
-    for rv_name, variational_rv in [("gp_f", q_f), ("sigma", q_sig)]:
-        kl += tf.reduce_sum(
-            variational_rv.distribution.kl_divergence(
-                model_tape[rv_name].distribution)
-        )
+    if _ADD_MFVI_MIXTURE:
+        # compute MC approximation
+        qf_sample = q_f.distribution.sample(_N_INFERENCE_SAMPLE)
+        qsig_sample = q_sig.distribution.sample(_N_INFERENCE_SAMPLE)
+
+        kl = (q_f.distribution.log_prob(qf_sample) -
+              gp_f.distribution.log_prob(qf_sample)) + (
+                     q_sig.distribution.log_prob(qsig_sample) -
+                     sigma.distribution.log_prob(qsig_sample))
+    else:
+        # compute analytical form
+        kl = 0.
+        for rv_name, variational_rv in [("gp_f", q_f), ("sigma", q_sig)]:
+            kl += tf.reduce_sum(
+                variational_rv.distribution.kl_divergence(
+                    model_tape[rv_name].distribution)
+            )
 
     # define loss op: ELBO = E_q(p(x|z)) + KL(q || p)
     elbo = tf.reduce_mean(log_likelihood - kl)
@@ -332,24 +348,31 @@ with tf.Session(graph=sgp_graph) as sess:
     sess.run(init_op)
     for step in range(max_steps):
         start_time = time.time()
-        (Sigma_pre_val, S_val, Kxx_val, Kxz_val,
-         Kzz_val, Kzz_inv_val, Kxz_Kzz_inv_val) = sess.run([
-            Sigma_pre, S, Kxx, Kxz, Kzz, Kzz_inv, Kxz_Kzz_inv])
         _, elbo_value = sess.run([train_op, elbo])
         if step % 1000 == 0:
             duration = time.time() - start_time
             print("Step: {:>3d} Loss: {:.3f} ({:.3f} sec)".format(
                 step, elbo_value, duration))
+
+    # obtain final fit
     qf_mean_val, qf_cov_val = sess.run([qf_mean, qf_cov])
+
+    if _ADD_MFVI_MIXTURE:
+        mixture_par_list_val = sess.run(mixture_par_list)
+    else:
+        mixture_par_list_val = []
 
     sess.close()
 
 """ 4.3. prediction & visualization """
 with tf.Session() as sess:
-    f_samples = gp_regression.variational_sgpr_sample(n_sample=10000,
-                                                      qf_mean=qf_mean_val,
-                                                      qf_cov=qf_cov_val)
-    f_samples_val = sess.run(f_samples)
+    f_samples_sgpr = gp_regression.variational_sgpr_sample(
+        n_sample=_N_POSTERIOR_SAMPLE,
+        qf_mean=qf_mean_val, qf_cov=qf_cov_val,
+        mfvi_mixture=_ADD_MFVI_MIXTURE,
+        mixture_par_list=mixture_par_list_val)
+
+    f_samples_val = sess.run(f_samples_sgpr)
 
 # still use exact posterior predictive
 f_test_val = gp.sample_posterior_full(X_new=X_valid, X=X_train,
@@ -366,8 +389,12 @@ gpr_1d_visual(mu, cov,
               X_test=X_valid, y_test=y_valid,
               X_induce=X_induce,
               rmse_id=calib_sample_id,
-              title="RBF, Structured VI (Sparse GP)",
-              save_addr="./result/gpr/gpr_sgp.png")
+              title="RBF, Sparse GP{}".format(
+                  "-MF Mixture" if _ADD_MFVI_MIXTURE else ""
+              ),
+              save_addr="./result/gpr/gpr_sgp{}.png".format(
+                  "_mfvi_mixture" if _ADD_MFVI_MIXTURE else ""
+              ))
 
 """""""""""""""""""""""""""""""""
 # 5. Decoupled Sparse GP
@@ -388,39 +415,60 @@ In practice, parametrize B = LL^T using the Cholesky decomposition, then:
 
 """
 
+_ADD_MFVI_MIXTURE = False
+_N_INFERENCE_SAMPLE = 50
+
 """ 5.1. Set up the computational graph """
 # X_induce_mean = X_train
 X_induce_mean = KMeans(n_clusters=50, random_state=100).fit(
     X_train).cluster_centers_.astype(np.float32)
 X_induce_cov = KMeans(n_clusters=15, random_state=100).fit(
     X_train).cluster_centers_.astype(np.float32)
+# X_induce = np.linspace(np.min(X_train), np.max(X_train), num=50)
+# X_induce = np.linspace(np.min(X_train), np.max(X_train), num=15)
+#
+# X_induce = np.expand_dims(X_induce, -1).astype(np.float32)
+# X_induce = np.expand_dims(X_induce, -1).astype(np.float32)
 
 dgp_graph = tf.Graph()
 with dgp_graph.as_default():
     # sample from variational family
 
-    q_f, q_sig, qf_mean, qf_cov = (
+    q_f, q_sig, qf_mean, qf_cov, mixture_par_list = (
         gp_regression.variational_dgpr(X=X_train,
                                        Zm=X_induce_mean,
                                        Zs=X_induce_cov,
-                                       ls=np.exp(_DEFAULT_LOG_LS_SCALE)))
+                                       ls=np.exp(_DEFAULT_LOG_LS_SCALE),
+                                       mfvi_mixture=_ADD_MFVI_MIXTURE)
+    )
 
     # compute the expected predictive log-likelihood
     with ed.tape() as model_tape:
         with ed.interception(make_value_setter(gp_f=q_f, sigma=q_sig)):
-            y, _, _, _ = gp_regression.model(X=X_train,
-                                             log_ls=_DEFAULT_LOG_LS_SCALE,
-                                             ridge_factor=1e-4)
+            y, gp_f, sigma, _ = gp_regression.model(X=X_train,
+                                                    log_ls=_DEFAULT_LOG_LS_SCALE,
+                                                    ridge_factor=1e-4)
 
     log_likelihood = y.distribution.log_prob(y_train)
 
     # compute the KL divergence
-    kl = 0.
-    for rv_name, variational_rv in [("gp_f", q_f), ("sigma", q_sig)]:
-        kl += tf.reduce_sum(
-            variational_rv.distribution.kl_divergence(
-                model_tape[rv_name].distribution)
-        )
+    if _ADD_MFVI_MIXTURE:
+        # compute MC approximation
+        qf_sample = q_f.distribution.sample(_N_INFERENCE_SAMPLE)
+        qsig_sample = q_sig.distribution.sample(_N_INFERENCE_SAMPLE)
+
+        kl = (q_f.distribution.log_prob(qf_sample) -
+              gp_f.distribution.log_prob(qf_sample)) + (
+                     q_sig.distribution.log_prob(qsig_sample) -
+                     sigma.distribution.log_prob(qsig_sample))
+    else:
+        # compute analytical form
+        kl = 0.
+        for rv_name, variational_rv in [("gp_f", q_f), ("sigma", q_sig)]:
+            kl += tf.reduce_sum(
+                variational_rv.distribution.kl_divergence(
+                    model_tape[rv_name].distribution)
+            )
 
     # define loss op: ELBO = E_q(p(x|z)) + KL(q || p)
     elbo = tf.reduce_mean(log_likelihood - kl)
@@ -450,14 +498,22 @@ with tf.Session(graph=dgp_graph) as sess:
                 step, elbo_value, duration))
     qf_mean_val, qf_cov_val = sess.run([qf_mean, qf_cov])
 
+    if _ADD_MFVI_MIXTURE:
+        mixture_par_list_val = sess.run(mixture_par_list)
+    else:
+        mixture_par_list_val = []
+
     sess.close()
 
 """ 5.3. prediction & visualization """
 with tf.Session() as sess:
-    f_samples = gp_regression.variational_dgpr_sample(n_sample=10000,
-                                                      qf_mean=qf_mean_val,
-                                                      qf_cov=qf_cov_val)
-    f_samples_val = sess.run(f_samples)
+    f_samples_dgpr = gp_regression.variational_dgpr_sample(
+        n_sample=_N_POSTERIOR_SAMPLE,
+        qf_mean=qf_mean_val, qf_cov=qf_cov_val,
+        mfvi_mixture=_ADD_MFVI_MIXTURE,
+        mixture_par_list=mixture_par_list_val)
+
+    f_samples_val = sess.run(f_samples_dgpr)
 
 # still use exact posterior predictive
 f_test_val = gp.sample_posterior_full(X_new=X_valid, X=X_train,
@@ -474,8 +530,12 @@ gpr_1d_visual(mu, cov,
               X_test=X_valid, y_test=y_valid,
               X_induce=X_induce_mean,
               rmse_id=calib_sample_id,
-              title="RBF, Decoupled Sparse GP",
-              save_addr="./result/gpr/gpr_dgp.png")
+              title="RBF, Decoupled GP{}".format(
+                  "-MF Mixture" if _ADD_MFVI_MIXTURE else ""
+              ),
+              save_addr="./result/gpr/gpr_dgp{}.png".format(
+                  "_mfvi_mixture" if _ADD_MFVI_MIXTURE else ""
+              ))
 
 """""""""""""""""""""""""""""""""""""""""""""
 # Appendix. MAP inference using GPflow-slim
