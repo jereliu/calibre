@@ -196,29 +196,47 @@ gpr_1d_visual(mu, cov,
 """""""""""""""""""""""""""""""""
 # 3. Mean-field VI
 """""""""""""""""""""""""""""""""
+_ADD_MFVI_MIXTURE = True
+_N_INFERENCE_SAMPLE = 50
+_N_MFVI_MIXTURE = 5
 
 """ 3.1. Set up the computational graph """
 mfvi_graph = tf.Graph()
 with mfvi_graph.as_default():
     # sample from variational family
-    q_f, q_sig, qf_mean, qf_sdev = gp_regression.variational_mfvi(X=X_train)
+    q_f, q_sig, qf_mean, qf_sdev, mixture_par_list = (
+        gp_regression.variational_mfvi(X=X_train,
+                                       mfvi_mixture=_ADD_MFVI_MIXTURE,
+                                       n_mixture=_N_MFVI_MIXTURE))
 
     # compute the expected predictive log-likelihood
     with ed.tape() as model_tape:
         with ed.interception(make_value_setter(gp_f=q_f, sigma=q_sig)):
-            y, _, _, _ = gp_regression.model(X=X_train,
-                                             log_ls=_DEFAULT_LOG_LS_SCALE,
-                                             ridge_factor=1e-3)
+            y, gp_f, sigma, _ = gp_regression.model(X=X_train,
+                                                    log_ls=_DEFAULT_LOG_LS_SCALE,
+                                                    ridge_factor=1e-3)
 
     log_likelihood = y.distribution.log_prob(y_train)
 
     # compute the KL divergence
-    kl = 0.
-    for rv_name, variational_rv in [("gp_f", q_f), ("sigma", q_sig)]:
-        kl += tf.reduce_sum(
-            variational_rv.distribution.kl_divergence(
-                model_tape[rv_name].distribution)
-        )
+    if _ADD_MFVI_MIXTURE:
+        # compute MC approximation
+        qf_sample = q_f.distribution.sample(_N_INFERENCE_SAMPLE)
+        qsig_sample = q_sig.distribution.sample(_N_INFERENCE_SAMPLE)
+
+        kl = (q_f.distribution.log_prob(qf_sample) -
+              gp_f.distribution.log_prob(qf_sample)) + (
+                     q_sig.distribution.log_prob(qsig_sample) -
+                     sigma.distribution.log_prob(qsig_sample))
+
+    else:
+        # compute analytical form
+        kl = 0.
+        for rv_name, variational_rv in [("gp_f", q_f), ("sigma", q_sig)]:
+            kl += tf.reduce_sum(
+                variational_rv.distribution.kl_divergence(
+                    model_tape[rv_name].distribution)
+            )
 
     # define loss op: ELBO = E_q(p(x|z)) + KL(q || p)
     elbo = tf.reduce_mean(log_likelihood - kl)
@@ -233,7 +251,7 @@ with mfvi_graph.as_default():
     mfvi_graph.finalize()
 
 """ 3.2. execute optimization """
-max_steps = 50000  # number of training iterations
+max_steps = 100000  # number of training iterations
 
 with tf.Session(graph=mfvi_graph) as sess:
     start_time = time.time()
@@ -248,13 +266,20 @@ with tf.Session(graph=mfvi_graph) as sess:
                 step, elbo_value, duration))
     qf_mean_val, qf_sdev_val = sess.run([qf_mean, qf_sdev])
 
+    if _ADD_MFVI_MIXTURE:
+        mixture_par_list_val = sess.run(mixture_par_list)
+    else:
+        mixture_par_list_val = []
+
     sess.close()
 
 """ 3.3. prediction & visualization """
 with tf.Session() as sess:
     f_samples = gp_regression.variational_mfvi_sample(n_sample=10000,
                                                       qf_mean=qf_mean_val,
-                                                      qf_sdev=qf_sdev_val)
+                                                      qf_sdev=qf_sdev_val,
+                                                      mfvi_mixture=_ADD_MFVI_MIXTURE,
+                                                      mixture_par_list=mixture_par_list_val)
     f_samples_val = sess.run(f_samples)
 
 # still use exact posterior predictive
@@ -271,13 +296,21 @@ gpr_1d_visual(mu, cov,
               X_train=X_train, y_train=y_train,
               X_test=X_valid, y_test=y_valid,
               rmse_id=calib_sample_id,
-              title="RBF, Mean-field VI",
-              save_addr="./result/gpr/gpr_mfvi.png")
+              title="RBF, Mean-field VI{}".format(
+                  "-MF {} Mixture".format(_N_MFVI_MIXTURE)
+                  if _ADD_MFVI_MIXTURE else ""
+              ),
+              save_addr="./result/gpr/gpr_mfvi{}.png".format(
+                  "_mfvi_{}_mixture".format(_N_MFVI_MIXTURE)
+                  if _ADD_MFVI_MIXTURE else ""
+              ))
 
 """""""""""""""""""""""""""""""""
 # 4. Sparse GP (Structured VI)
 """""""""""""""""""""""""""""""""
-_ADD_MFVI_MIXTURE = False
+_ADD_MFVI_MIXTURE = True
+_N_MFVI_MIXTURE = 5
+
 _N_INFERENCE_SAMPLE = 50
 _N_POSTERIOR_SAMPLE = 10000
 
@@ -296,7 +329,8 @@ with sgp_graph.as_default():
         gp_regression.variational_sgpr(X=X_train,
                                        Z=X_induce,
                                        ls=np.exp(_DEFAULT_LOG_LS_SCALE),
-                                       mfvi_mixture=_ADD_MFVI_MIXTURE)
+                                       mfvi_mixture=_ADD_MFVI_MIXTURE,
+                                       n_mixture=_N_MFVI_MIXTURE)
     )
 
     # compute the expected predictive log-likelihood
@@ -318,6 +352,7 @@ with sgp_graph.as_default():
               gp_f.distribution.log_prob(qf_sample)) + (
                      q_sig.distribution.log_prob(qsig_sample) -
                      sigma.distribution.log_prob(qsig_sample))
+
     else:
         # compute analytical form
         kl = 0.
@@ -331,7 +366,7 @@ with sgp_graph.as_default():
     elbo = tf.reduce_mean(log_likelihood - kl)
 
     # define optimizer
-    optimizer = tf.train.AdamOptimizer(5e-2)
+    optimizer = tf.train.AdamOptimizer(5e-3)
     train_op = optimizer.minimize(-elbo)
 
     # define init op
@@ -340,7 +375,7 @@ with sgp_graph.as_default():
     sgp_graph.finalize()
 
 """ 4.2. execute optimization """
-max_steps = 50000  # number of training iterations
+max_steps = 100000  # number of training iterations
 
 with tf.Session(graph=sgp_graph) as sess:
     start_time = time.time()
@@ -390,10 +425,12 @@ gpr_1d_visual(mu, cov,
               X_induce=X_induce,
               rmse_id=calib_sample_id,
               title="RBF, Sparse GP{}".format(
-                  "-MF Mixture" if _ADD_MFVI_MIXTURE else ""
+                  "-MF {} Mixture".format(_N_MFVI_MIXTURE)
+                  if _ADD_MFVI_MIXTURE else ""
               ),
               save_addr="./result/gpr/gpr_sgp{}.png".format(
-                  "_mfvi_mixture" if _ADD_MFVI_MIXTURE else ""
+                  "_mfvi_{}_mixture".format(_N_MFVI_MIXTURE)
+                  if _ADD_MFVI_MIXTURE else ""
               ))
 
 """""""""""""""""""""""""""""""""
@@ -415,8 +452,9 @@ In practice, parametrize B = LL^T using the Cholesky decomposition, then:
 
 """
 
-_ADD_MFVI_MIXTURE = False
+_ADD_MFVI_MIXTURE = True
 _N_INFERENCE_SAMPLE = 50
+_N_MFVI_MIXTURE = 5
 
 """ 5.1. Set up the computational graph """
 # X_induce_mean = X_train
@@ -439,7 +477,8 @@ with dgp_graph.as_default():
                                        Zm=X_induce_mean,
                                        Zs=X_induce_cov,
                                        ls=np.exp(_DEFAULT_LOG_LS_SCALE),
-                                       mfvi_mixture=_ADD_MFVI_MIXTURE)
+                                       mfvi_mixture=_ADD_MFVI_MIXTURE,
+                                       n_mixture=_N_MFVI_MIXTURE)
     )
 
     # compute the expected predictive log-likelihood
@@ -474,7 +513,7 @@ with dgp_graph.as_default():
     elbo = tf.reduce_mean(log_likelihood - kl)
 
     # define optimizer
-    optimizer = tf.train.AdamOptimizer(1e-2)
+    optimizer = tf.train.AdamOptimizer(5e-3)
     train_op = optimizer.minimize(-elbo)
 
     # define init op
@@ -483,7 +522,7 @@ with dgp_graph.as_default():
     dgp_graph.finalize()
 
 """ 5.2. execute optimization """
-max_steps = 50000  # number of training iterations
+max_steps = 100000  # number of training iterations
 
 with tf.Session(graph=dgp_graph) as sess:
     start_time = time.time()
@@ -531,10 +570,12 @@ gpr_1d_visual(mu, cov,
               X_induce=X_induce_mean,
               rmse_id=calib_sample_id,
               title="RBF, Decoupled GP{}".format(
-                  "-MF Mixture" if _ADD_MFVI_MIXTURE else ""
+                  "-MF {} Mixture".format(_N_MFVI_MIXTURE)
+                  if _ADD_MFVI_MIXTURE else ""
               ),
               save_addr="./result/gpr/gpr_dgp{}.png".format(
-                  "_mfvi_mixture" if _ADD_MFVI_MIXTURE else ""
+                  "_mfvi_{}_mixture".format(_N_MFVI_MIXTURE)
+                  if _ADD_MFVI_MIXTURE else ""
               ))
 
 """""""""""""""""""""""""""""""""""""""""""""

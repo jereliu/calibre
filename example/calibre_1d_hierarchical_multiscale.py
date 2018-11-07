@@ -83,7 +83,6 @@ _EXAMPLE_DICTIONARY_SIMPLE = {
     "complex": ["rbf_0.02", "rbf_0.01"],
 }
 
-
 _EXAMPLE_DICTIONARY_SIMPLE = {
     "root": ["rbf_0.2",
              "rbf_0.1",
@@ -821,7 +820,8 @@ if _PLOT_COMPOSITION:
 # 3. Variational Inference
 """""""""""""""""""""""""""""""""
 _ADD_MFVI_MIXTURE = True
-_N_INFERENCE_SAMPLE = 50
+_N_INFERENCE_SAMPLE = 20
+_N_MFVI_MIXTURE = 5
 
 DEFAULT_LOG_LS_WEIGHT = np.log(0.075).astype(np.float32)
 DEFAULT_LOG_LS_RESID = np.log(0.05).astype(np.float32)
@@ -839,28 +839,37 @@ family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 n_final_sample = 1000  # number of samples to collect from variational family
 max_steps = 100000  # number of training iterations
 
-# X_induce_mean = KMeans(n_clusters=50, random_state=100).fit(
-#     X_test).cluster_centers_.astype(np.float32)
-X_induce_mean = np.expand_dims(np.linspace(np.min(X_test),
-                                           np.max(X_test), 50), 1).astype(np.float32)
-X_induce = np.expand_dims(np.linspace(np.min(X_test),
-                                      np.max(X_test), 20), 1).astype(np.float32)
+X_induce_mean = KMeans(n_clusters=50, random_state=100).fit(
+    X_test).cluster_centers_.astype(np.float32)
+X_induce = KMeans(n_clusters=20, random_state=100).fit(
+    X_test).cluster_centers_.astype(np.float32)
 
-for family_name in ["dgpr", "sgpr"]:
+# X_induce_mean = np.expand_dims(np.linspace(np.min(X_test),
+#                                            np.max(X_test), 50), 1).astype(np.float32)
+# X_induce = np.expand_dims(np.linspace(np.min(X_test),
+#                                       np.max(X_test), 20), 1).astype(np.float32)
+
+family_name_list = ["mfvi",
+                    "sgpr",
+                    "dgpr",
+                    ]
+
+for family_name in family_name_list:
+    family_name_root = family_name.split("_")[0]
     if _ADD_MFVI_MIXTURE:
-        family_name = "{}_mfvi_mix".format(family_name)
+        family_name = "{}_mfvi_{}_mix".format(family_name, _N_MFVI_MIXTURE)
 
     os.makedirs('{}/{}'.format(_SAVE_ADDR_PREFIX, family_name), exist_ok=True)
 
-    if family_name == "mfvi":
+    if family_name_root == "mfvi":
         family_name_full = "Mean-field VI"
         ensemble_variational_family = adaptive_ensemble.variational_mfvi
         ensemble_variational_family_sample = adaptive_ensemble.variational_mfvi_sample
-    elif family_name == "sgpr":
+    elif family_name_root == "sgpr":
         family_name_full = "Sparse Gaussian Process"
         ensemble_variational_family = adaptive_ensemble.variational_sgpr
         ensemble_variational_family_sample = adaptive_ensemble.variational_sgpr_sample
-    elif family_name == "dgpr":
+    elif family_name_root == "dgpr":
         family_name_full = "Decoupled Gaussian Process"
         ensemble_variational_family = adaptive_ensemble.variational_dgpr
         ensemble_variational_family_sample = adaptive_ensemble.variational_dgpr_sample
@@ -885,7 +894,8 @@ for family_name in ["dgpr", "sgpr"]:
                                              log_ls_resid=DEFAULT_LOG_LS_RESID,
                                              kernel_func=gp.rbf,
                                              ridge_factor=1e-3,
-                                             mfvi_mixture=_ADD_MFVI_MIXTURE)
+                                             mfvi_mixture=_ADD_MFVI_MIXTURE,
+                                             n_mixture=_N_MFVI_MIXTURE)
 
             # assemble kwargs for make_value_setter
             variational_rv_dict = {"ensemble_resid": resid_gp, "sigma": sigma, }
@@ -909,8 +919,9 @@ for family_name in ["dgpr", "sgpr"]:
                 if _ADD_MFVI_MIXTURE:
                     # compute MC approximation
                     param_approx_sample = variational_rv.distribution.sample(_N_INFERENCE_SAMPLE)
-                    param_kl = (variational_rv.distribution.log_prob(param_approx_sample) -
-                                model_tape[rv_name].distribution.log_prob(param_approx_sample))
+                    param_kl = tf.reduce_mean(
+                        variational_rv.distribution.log_prob(param_approx_sample) -
+                        model_tape[rv_name].distribution.log_prob(param_approx_sample))
                 else:
                     # compute analytical form
                     param_kl = variational_rv.distribution.kl_divergence(
