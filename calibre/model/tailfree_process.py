@@ -511,7 +511,7 @@ def variational_family_sample(n_sample, mfvi_mixture,
     temp_sample_dict = dict()
     for model_names in temp_mean_dict.keys():
         temp_sample_dict[model_names] = (
-            inference_util.scalar_gaussian_variational_sample(
+            inference_util.sample_scalar_gaussian_variational(
                 n_sample,
                 temp_mean_dict[model_names],
                 temp_sdev_dict[model_names]))

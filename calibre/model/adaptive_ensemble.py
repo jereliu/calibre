@@ -390,7 +390,8 @@ def sample_posterior_tailfree(X, base_pred_dict, family_tree, weight_gp_dict, te
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
-def variational_family(X, base_pred, log_ls_weight=None, log_ls_resid=None, family_tree=None,
+def variational_family(X, base_pred,
+                       log_ls_weight=None, log_ls_resid=None, family_tree=None,
                        gp_vi_family=gp.variational_mfvi, **kwargs):
     """Defines the variational family for sparse adaptive ensemble model.
 
@@ -544,11 +545,11 @@ def variational_family_sample(n_sample,
                                      mixture_par_list=mixture_par_resid)
 
     # sample observational noise
-    sigma_sample = inference_util.scalar_gaussian_variational_sample(
+    sigma_sample = inference_util.sample_scalar_gaussian_variational(
         n_sample, sigma_mean, sigma_sdev)
-    ls_weight_sample = inference_util.scalar_gaussian_variational_sample(
+    ls_weight_sample = inference_util.sample_scalar_gaussian_variational(
         n_sample, log_ls_weight_mean, log_ls_weight_sdev)
-    ls_resid_sample = inference_util.scalar_gaussian_variational_sample(
+    ls_resid_sample = inference_util.sample_scalar_gaussian_variational(
         n_sample, log_ls_resid_mean, log_ls_resid_sdev)
 
     return (weight_gp_sample_dict, temp_sample_dict, resid_gp_sample,

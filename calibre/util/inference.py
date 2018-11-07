@@ -121,6 +121,114 @@ def make_cond_gp_parameters(K_00, K_11, K_22,
     return P_01.astype(np.float32), P_02.astype(np.float32), Sigma
 
 
+def make_mfvi_mixture_family(n_mixture, N, name):
+    """Makes mixture of MFVI variational prior
+
+    Args:
+        n_mixture: (int) Number of MFVI mixture.
+        N: (int) Number of sample observations.
+        name: (str) Name prefix of parameters
+
+    Returns:
+        mfvi_mix_dist: (tfd.Distribution) Mixture distribution.
+        mixture_logits_mfvi_mix: (tf.Variable or None) Mixture probability
+            (logit) for MFVI families. If n_mixture=1 then None.
+        qf_mean_mfvi_mix, qf_sdev_mfvi_mix (tf.Variable) Mean and sdev for
+            MFVI families. Shape (n_mixture, Nx) if n_mixture > 1, and shape
+            (Nx, ) if n_mixture = 1.
+    """
+    # define mixture probability
+    mixture_logits_mfvi_mix = tf.get_variable(shape=[n_mixture],
+                                              name='{}_mixture_logits_mfvi_mix'.format(name))
+
+    # define variational parameter
+    param_shape = [n_mixture, N] if n_mixture > 1 else [N]
+    qf_mean_mfvi_mix = tf.get_variable(shape=param_shape,
+                                       name='{}_mean_mfvi_mix'.format(name))
+    qf_sdev_mfvi_mix = tf.exp(tf.get_variable(shape=param_shape,
+                                              name='{}_sdev_mfvi_mix'.format(name)))
+
+    if n_mixture == 1:
+        mfvi_mix_dist = tfd.MultivariateNormalDiag(loc=qf_mean_mfvi_mix,
+                                                   scale_diag=qf_sdev_mfvi_mix)
+
+    else:
+        mfvi_mix_dist = tfd.MixtureSameFamily(
+            mixture_distribution=tfd.Categorical(logits=mixture_logits_mfvi_mix),
+            components_distribution=tfd.MultivariateNormalDiag(
+                loc=qf_mean_mfvi_mix,
+                scale_diag=qf_sdev_mfvi_mix),
+        )
+
+    return mfvi_mix_dist, mixture_logits_mfvi_mix, qf_mean_mfvi_mix, qf_sdev_mfvi_mix
+
+
+def sample_mfvi_mixture_family(N_sample, mixture_logits,
+                               mean_mfvi_mix, sdev_mfvi_mix):
+    """Samples from mixture of MFVI family.
+
+    Args:
+        N_sample: (int) Number of samples.
+        mixture_logits: (or None) Number of MFVI mixture.
+        mean_mfvi_mix: (np.ndarray) Means for MFVI components,
+            shape (n_mixture, N), dtype float32.
+        sdev_mfvi_mix: (np.ndarray) Stddev for MFVI components,
+            shape (n_mixture, N), dtype float32.
+
+    Returns:
+        mfvi_mix_sample: (tf.Tensor) Samples from mixture family,
+            shape (N, ), dtype float32.
+
+    """
+    # define mixture distribution
+    if mixture_logits.shape[0] > 1:
+        mfvi_mix_dist = tfd.MixtureSameFamily(
+            mixture_distribution=tfd.Categorical(logits=mixture_logits),
+            components_distribution=tfd.MultivariateNormalDiag(
+                loc=mean_mfvi_mix, scale_diag=sdev_mfvi_mix),
+        )
+    else:
+        mfvi_mix_dist = tfd.MultivariateNormalDiag(loc=mean_mfvi_mix,
+                                                   scale_diag=sdev_mfvi_mix)
+
+    return mfvi_mix_dist.sample(N_sample)
+
+
+def make_mfvi_sgp_mixture_family(n_mixture, N, gp_dist, name):
+    """Makes mixture of MFVI and Sparse GP variational prior
+
+    Args:
+        n_mixture: (int) Number of MFVI mixture.
+        N: (int) Number of sample observations.
+        gp_dist: (tfd.Distribution) variational family for gaussian process.
+        name: (str) Name prefix of parameters
+
+    Returns:
+        mfvi_mix_dist: (tfd.Distribution) Mixture distribution.
+        mixture_logits_mfvi_mix: (tf.Variable or None) Mixture probability
+            (logit) for MFVI families. If n_mixture=1 then None.
+        qf_mean_mfvi_mix, qf_sdev_mfvi_mix (tf.Variable) Mean and sdev for
+            MFVI families. Shape (n_mixture, Nx) if n_mixture > 1, and shape
+            (Nx, ) if n_mixture = 1.
+    """
+    # define mixture probability
+    mixture_logits = tf.get_variable(name="{}_mixture_logits".format(name), shape=[2])
+
+    (mfvi_mix_dist, mixture_logits_mfvi_mix,
+     qf_mean_mfvi_mix, qf_sdev_mfvi_mix
+     ) = make_mfvi_mixture_family(n_mixture=n_mixture, N=N, name=name)
+
+    mixture_par_list = [mixture_logits, mixture_logits_mfvi_mix,
+                        qf_mean_mfvi_mix, qf_sdev_mfvi_mix]
+
+    mfvi_sgp_mix_dist = ed.Mixture(
+        cat=tfd.Categorical(logits=mixture_logits),
+        components=[mfvi_mix_dist, gp_dist],
+        name=name)
+
+    return mfvi_sgp_mix_dist, mixture_par_list
+
+
 def scalar_gaussian_variational(name, mean=None, sdev=None):
     """
     Creates a scalar Gaussian random variable for variational approximation.
@@ -145,7 +253,7 @@ def scalar_gaussian_variational(name, mean=None, sdev=None):
     return scalar_gaussian_rv, mean, sdev
 
 
-def scalar_gaussian_variational_sample(n_sample, mean, sdev):
+def sample_scalar_gaussian_variational(n_sample, mean, sdev):
     """Generates samples from GPR scalar Gaussian random variable.
 
     Args:
