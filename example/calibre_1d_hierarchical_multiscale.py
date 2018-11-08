@@ -2273,8 +2273,10 @@ if _FIT_MCMC_MODELS:
     family_names += ["hmc"]
 
 if _FIT_VI_MODELS:
-    family_names += ["mfvi", "sgpr", "dgpr",
-                     "sgpr_mfvi_mix", "dgpr_mfvi_mix"]
+    family_names += [
+        "mfvi", "sgpr", "dgpr",
+        "mfvi_mfvi_5_mix", "sgpr_mfvi_5_mix", "dgpr_mfvi_5_mix",
+    ]
 
 if _FIT_AUG_VI_MODELS:
     family_names += ["mfvi_aug", "sgpr_aug", "mfvi_crps", "sgpr_crps"]
@@ -2467,8 +2469,10 @@ if _FIT_MCMC_MODELS:
     family_names += ["hmc"]
 
 if _FIT_VI_MODELS:
-    family_names += ["mfvi", "sgpr", "dgpr",
-                     "sgpr_mfvi_mix", "dgpr_mfvi_mix"]
+    family_names += [
+        "mfvi", "sgpr", "dgpr",
+        "mfvi_mfvi_5_mix", "sgpr_mfvi_5_mix", "dgpr_mfvi_5_mix",
+    ]
 
 if _FIT_AUG_VI_MODELS:
     family_names += ["mfvi_aug", "sgpr_aug", "mfvi_crps", "sgpr_crps"]
