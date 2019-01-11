@@ -33,7 +33,7 @@ from calibre.model import gaussian_process as gp
 from calibre.model import gp_regression
 
 import calibre.util.data as data_util
-import calibre.util.experiment as experiment_util
+import calibre.util.experiment_data as experiment_util
 
 from calibre.util.data import sin_curve_1d, cos_curve_1d, generate_1d_data
 from calibre.util.inference import make_value_setter

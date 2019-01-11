@@ -1,4 +1,8 @@
-"""Calibre (Adaptive Ensemble) with hierarchical structure using MCMC and Penalized VI. """
+"""Calibre (Adaptive Ensemble) with hierarchical structure using MCMC and Penalized VI.
+
+Perform on simple 1D data generated using experiment_util.generate_data_1d.
+
+"""
 # TODO(jereliu): adjust VI for ls_weight/ls_resid prior
 
 import os
@@ -31,7 +35,7 @@ import calibre.util.matrix as matrix_util
 import calibre.util.gp_flow as gpf_util
 import calibre.util.ensemble as ensemble_util
 import calibre.util.calibration as calib_util
-import calibre.util.experiment as experiment_util
+import calibre.util.experiment_data as experiment_util
 
 from calibre.util.inference import make_value_setter
 from calibre.util.gp_flow import DEFAULT_KERN_FUNC_DICT_RBF
