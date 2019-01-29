@@ -84,4 +84,6 @@ def prediction_tailfree(X_pred, X_train,
                                                     resid_gp_sample=ensemble_resid_valid_sample,
                                                     log_ls_weight=default_log_ls_weight))
 
-    return ensemble_sample_val, ensemble_mean_val
+    return (ensemble_sample_val, ensemble_mean_val,
+            ensemble_weights_val, cond_weights_dict_val,
+            ensemble_model_names)

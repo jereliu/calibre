@@ -121,6 +121,12 @@ DEFAULT_KERN_FUNC_DICT_GPY = {
     "rbf_0.5": {'kernel': gpf.kernels.RBF,
                 'param': {'lengthscales': .5,
                           'train_kernel_params': False}},
+    "rbf_0.3": {'kernel': gpf.kernels.RBF,
+                'param': {'lengthscales': .3,
+                          'train_kernel_params': False}},
+    "rbf_0.25": {'kernel': gpf.kernels.RBF,
+                'param': {'lengthscales': .25,
+                          'train_kernel_params': False}},
     "rbf_0.2": {'kernel': gpf.kernels.RBF,
                 'param': {'lengthscales': .2,
                           'train_kernel_params': False}},
@@ -311,7 +317,8 @@ def fit_base_gp_models(X_train, y_train,
                        kern_func_dict=DEFAULT_KERN_FUNC_DICT_GPY,
                        n_valid_sample=5000,
                        n_train_step=20000,
-                       save_addr_prefix="./plot/calibre/base"):
+                       save_addr_prefix="./plot/calibre/base",
+                       **visual_kwargs):
     """Run GPflow-Slim GPR according to list of supplied kernel functions.
 
     Args:
@@ -331,6 +338,8 @@ def fit_base_gp_models(X_train, y_train,
         n_train_step: (int) Number of training step.
         save_addr_prefix: (str) Prefix to save address for plots and
             model prediction/samples.
+        **visual_kwargs: Additional keyword args to pass to gpr_1d_visual or
+            gpr_2d_visual
     """
     pathlib.Path(save_addr_prefix).mkdir(parents=True, exist_ok=True)
 
@@ -379,14 +388,16 @@ def fit_base_gp_models(X_train, y_train,
                 X_test=X_valid, y_test=y_valid,
                 compute_rmse=True, rmse_id=y_valid_rmse_id,
                 title=kern_name,
-                save_addr="{}/fit/{}.png".format(save_addr_prefix, kern_name))
+                save_addr="{}/fit/{}.png".format(save_addr_prefix, kern_name),
+                **visual_kwargs)
         elif X_train.squeeze().ndim == 2:
             visual_util.gpr_2d_visual(
                 pred_mean=mu_valid, pred_cov=var_valid,
                 X_train=X_train, y_train=y_train,
                 X_test=X_valid, y_test=y_valid,
                 title=kern_name,
-                save_addr="{}/fit/{}.png".format(save_addr_prefix, kern_name))
+                save_addr="{}/fit/{}.png".format(save_addr_prefix, kern_name),
+                **visual_kwargs)
 
         visual_util.prob_calibration_1d(
             y_valid, valid_samp_list[kern_name],

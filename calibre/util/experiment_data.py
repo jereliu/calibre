@@ -9,10 +9,13 @@ import calibre.util.data as data_util
 """ 1. Data generation """
 
 
-def generate_data_1d(N_train=20, N_test=20, N_valid=500, noise_sd=0.03,
+def generate_data_1d(N_train=20, N_test=20, N_calib=500, N_valid=500,
+                     noise_sd=0.03,
                      data_gen_func=data_util.sin_curve_1d,
+                     data_gen_func_x=None, data_gen_func_x_test=None,
                      data_range=(0., 1.), valid_range=(-0.5, 1.5),
-                     seed_train=1000, seed_test=1500, seed_calib=100):
+                     seed_train=1000, seed_test=1500, seed_calib=100,
+                     valid_sample_size=1000):
     """
     Generates data for 1d experiment.
 
@@ -22,11 +25,15 @@ def generate_data_1d(N_train=20, N_test=20, N_valid=500, noise_sd=0.03,
         N_valid: (int) size of validation data
         noise_sd: (int) noise level for train/test.
         data_gen_func: (function) data-generation function.
+        data_gen_func_x: (function) data-generation function for feature.
+        data_gen_func_x_test: (function) data-generation function for feature
+            used for testing.
         data_range: (tuple of float32) range of x to sample from for train/test.
         valid_range: (tuple of float32) range of x to sample from for validation.
         seed_train: (int) random seed for generating training data.
         seed_test: (int) random seed for generating testing data.
         seed_calib: (int) random seed for generating calibration index.
+        valid_sample_size: (int) sample to draw to calculate mean(y_valid).
 
     Returns:
         X_train, y_train, X_test, y_test, X_valid, y_valid. (np.ndarray of float32)
@@ -38,16 +45,23 @@ def generate_data_1d(N_train=20, N_test=20, N_valid=500, noise_sd=0.03,
     # generate train and test data, then adjust shape
     X_train, y_train = data_util.generate_1d_data(N=N_train,
                                                   f=data_gen_func,
+                                                  f_x=data_gen_func_x,
                                                   noise_sd=noise_sd,
                                                   seed=seed_train,
-                                                  uniform_x=True,
                                                   uniform_x_range=data_range)
     X_test, y_test = data_util.generate_1d_data(N=N_test,
                                                 f=data_gen_func,
+                                                f_x=data_gen_func_x_test,
                                                 noise_sd=noise_sd,
                                                 seed=seed_test,
-                                                uniform_x=True,
                                                 uniform_x_range=data_range)
+
+    X_calib, y_calib = data_util.generate_1d_data(N=N_calib,
+                                                  f=data_gen_func,
+                                                  f_x=data_gen_func_x_test,
+                                                  noise_sd=noise_sd,
+                                                  seed=seed_calib,
+                                                  uniform_x_range=data_range)
 
     X_train = np.expand_dims(X_train, 1).astype(np.float32)
     y_train = y_train.astype(np.float32)
@@ -55,18 +69,32 @@ def generate_data_1d(N_train=20, N_test=20, N_valid=500, noise_sd=0.03,
     y_test = y_test.astype(np.float32)
 
     # generate validation data
-    X_valid = np.expand_dims(
-        np.linspace(valid_range[0], valid_range[1], N_valid), 1).astype(np.float32)
-    y_valid = data_gen_func(X_valid)
+    X_valid = np.linspace(valid_range[0], valid_range[1], N_valid)
+    X_valid = np.expand_dims(X_valid, 1).astype(np.float32)
+
+    y_valid_sample = data_gen_func(np.repeat(X_valid, valid_sample_size, axis=-1))
 
     # generate id for calibration data
     np.random.seed(seed_calib)
-    calib_sample_id = np.where((X_valid > data_range[0]) &
-                               (X_valid <= data_range[1]))[0]
-    calib_sample_id = np.random.choice(calib_sample_id,
-                                       size=len(calib_sample_id),
-                                       replace=False)
-    return X_train, y_train, X_test, y_test, X_valid, y_valid, calib_sample_id
+    calib_sample_id = np.argmin(np.abs(X_valid - X_calib[None, :]),
+                                axis=0)
+
+    # standardize data
+    std_centr_X = np.mean(X_test)
+    std_scale_X = np.std(X_test)
+    std_centr_y = np.mean(y_test)
+    std_scale_y = np.std(y_test) * 2
+
+    X_train = (X_train - std_centr_X) / std_scale_X
+    X_test = (X_test - std_centr_X) / std_scale_X
+    X_valid = (X_valid - std_centr_X) / std_scale_X
+
+    y_train = (y_train - std_centr_y) / std_scale_y
+    y_test = (y_test - std_centr_y) / std_scale_y
+    y_valid_sample = (y_valid_sample - std_centr_y) / std_scale_y
+
+    return (X_train, y_train, X_test, y_test,
+            X_valid, y_valid_sample, calib_sample_id)
 
 
 def generate_data_1d_multiscale(

@@ -2,8 +2,14 @@
 import os
 import pathlib
 
+import tqdm
+
 import pandas as pd
 import numpy as np
+import scipy.stats as stats
+import scipy.signal as signal
+
+import statsmodels.nonparametric.api as smnp
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -22,8 +28,13 @@ def gpr_1d_visual(pred_mean,
                   X_test=None, y_test=None, X_induce=None,
                   compute_rmse=True, rmse_id=None,
                   quantile_colors=None, quantile_alpha=0.1,
-                  y_range=[-4.5, 4.5], add_reference=False,
-                  title="", save_addr="", fontsize=12):
+                  y_range=None, add_reference=False,
+                  quantile_shade_legend=None,
+                  title="", save_addr="", fontsize=12,
+                  quantile_colors_norm=None, ax=None,
+                  smooth_mean=False, smooth_quantile=True,
+                  pred_mean_color='blue',
+                  pred_mean_alpha=0.25, figsize=None):
     """Plots the GP posterior predictive mean and uncertainty.
 
     Args:
@@ -41,6 +52,8 @@ def gpr_1d_visual(pred_mean,
         compute_rmse: (bool) Whether to compute test RMSE.
         rmse_id: (np.ndarray of int or None) Subset of X_test to compute
             rmse on. If None then all X_test are used.
+        quantile_shade_legend: (list of str or None) Legend names for quantile shades. If None then no
+            legend will be added.
         title: (str) Title of the image.
         save_addr: (str) Address to save image to.
         fontsize: (int) font size for title and axis labels
@@ -53,7 +66,8 @@ def gpr_1d_visual(pred_mean,
         pathlib.Path(save_addr).parent.mkdir(parents=True, exist_ok=True)
         plt.ioff()
 
-    fig, ax = plt.subplots()
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
 
     # plot predictions:
     X_test = np.unique(X_test, axis=0)
@@ -61,8 +75,18 @@ def gpr_1d_visual(pred_mean,
     # posterior predictive
     if isinstance(pred_mean, np.ndarray):
         pred_mean = pred_mean.squeeze()[:len(X_test)]
+
+        if smooth_mean:
+            # compute window length for filter
+            window_len = len(pred_mean) // 15
+            if window_len % 2 == 0:
+                # savgol_filter requires odd window size
+                window_len = window_len + 1
+
+            pred_mean = signal.savgol_filter(pred_mean, window_len, polyorder=3)
+
         ax.plot(X_test.squeeze(), pred_mean.squeeze(),
-                c='blue', alpha=.5)
+                c=pred_mean_color, alpha=pred_mean_alpha)
 
     # posterior confidence interval based on std
     if isinstance(pred_cov, np.ndarray):
@@ -80,12 +104,63 @@ def gpr_1d_visual(pred_mean,
         if quantile_colors is None:
             quantile_colors = ["black"] * len(pred_quantiles)
 
+        shade_list = []
+
+        if isinstance(quantile_alpha, float):
+            quantile_alpha = [quantile_alpha]
+
+        if len(quantile_alpha) == 1:
+            quantile_alpha = list(quantile_alpha) * len(pred_quantiles)
+
         for id, (upper, lower) in enumerate(pred_quantiles):
             upper = upper.squeeze()[:len(X_test)]
             lower = lower.squeeze()[:len(X_test)]
-            ax.fill_between(X_test.squeeze(), upper, lower,
-                            color=quantile_colors[id],
-                            alpha=quantile_alpha, edgecolor=None, linewidth=0.0)
+
+            if smooth_quantile:
+                # compute window length for filter
+                window_len = len(upper) // 8
+                if window_len % 2 == 0:
+                    # savgol_filter requires odd window size
+                    window_len = window_len + 1
+
+                upper = signal.savgol_filter(upper, window_len, polyorder=3)
+                lower = signal.savgol_filter(lower, window_len, polyorder=3)
+
+            if isinstance(quantile_colors, np.ndarray):
+                quantile_shade = rainbow_fill_between(ax, X_test.squeeze(), upper, lower,
+                                                      colors=quantile_colors,
+                                                      norm=quantile_colors_norm,
+                                                      alpha=quantile_alpha[id])
+            else:
+                # first wash out previous color
+                ax.fill_between(X_test.squeeze(), upper, lower,
+                                color="white",
+                                edgecolor=None, linewidth=0.0)
+                quantile_shade = ax.fill_between(X_test.squeeze(), upper, lower,
+                                                 color=quantile_colors[id],
+                                                 alpha=quantile_alpha[id],
+                                                 edgecolor=None, linewidth=0.0)
+
+            shade_list.append(quantile_shade)
+
+            if quantile_shade_legend:
+                plt.legend(shade_list, quantile_shade_legend)
+
+    # plot training data
+    if isinstance(X_train, np.ndarray):
+        if X_train.size < 50:
+            ax.plot(X_train.squeeze(), y_train.squeeze(), 'o',
+                    c='red', markeredgecolor='black')
+        elif X_train.size < 100:
+            ax.plot(X_train.squeeze(), y_train.squeeze(), '.',
+                    c='red', alpha=.5)
+        else:
+            ax.scatter(X_train.squeeze(), y_train.squeeze(), marker='.',
+                       c='red', alpha=.5, s=1)
+
+    if isinstance(X_induce, np.ndarray):
+        for x_vertical in X_induce:
+            plt.axvline(x=x_vertical, c='black', alpha=.05)
 
     # posterior samples
     if isinstance(pred_samples, list):
@@ -119,24 +194,20 @@ def gpr_1d_visual(pred_mean,
             else:
                 raise ValueError("y_test must be multiple of X_test.")
 
-    if isinstance(X_train, np.ndarray):
-        ax.plot(X_train.squeeze(), y_train.squeeze(), 'o', c='red',
-                markeredgecolor='black')
-    if isinstance(X_induce, np.ndarray):
-        for x_vertical in X_induce:
-            plt.axvline(x=x_vertical, c='black', alpha=.05)
+    ax.set_title(title, fontsize=fontsize)
 
-    plt.title(title, fontsize=fontsize)
     if y_range is not None:
-        plt.ylim(y_range)
+        ax.set_ylim(y_range)
 
     if add_reference:
-        plt.axhline(y=0, c='black')
+        ax.axhline(y=0, c='black')
 
     if save_addr:
         plt.savefig(save_addr)
         plt.close()
         plt.ion()
+
+    return ax
 
 
 def gpr_2d_visual(pred_mean, pred_cov,
@@ -600,3 +671,268 @@ def make_color_norm(color_data, method="percentile"):
         raise ValueError("Method {} is not supported".format(method))
 
     return BoundaryNorm(levels, 256)
+
+
+def scaled_1d_kde_plot(data, shade, bandwidth='scott',
+                       vertical=False, legend=False, ax=None,
+                       density_scale=None, **kwargs):
+    """Plot a univariate kernel density estimate on one of the axes.
+
+    Adapted from _univariate_kdeplot from seaborn but allow user to
+    scale densityu estimates using  density_scale.
+    """
+    if ax is None:
+        ax = plt.gca()
+
+    # Calculate the KDE
+    kde = smnp.KDEUnivariate(data.astype('double'))
+    kde.fit(bw=bandwidth)
+    x, y = kde.support, kde.density
+
+    if density_scale:
+        y = density_scale * y / np.max(y)
+
+    # Make sure the density is nonnegative
+    y = np.amax(np.c_[np.zeros_like(y), y], axis=1)
+
+    # Flip the data if the plot should be on the y axis
+    if vertical:
+        x, y = y, x
+
+    # Check if a label was specified in the call
+    label = kwargs.pop("label", None)
+
+    # Otherwise check if the data object has a name
+    if label is None and hasattr(data, "name"):
+        label = data.name
+
+    # Decide if we're going to add a legend
+    legend = label is not None and legend
+    label = "_nolegend_" if label is None else label
+
+    # Use the active color cycle to find the plot color
+    facecolor = kwargs.pop("facecolor", None)
+    line, = ax.plot(x, y, **kwargs)
+    color = line.get_color()
+    line.remove()
+    kwargs.pop("color", None)
+    facecolor = color if facecolor is None else facecolor
+
+    # Draw the KDE plot and, optionally, shade
+    ax.plot(x, y, color=color, label=label, **kwargs)
+    shade_kws = dict(
+        facecolor=facecolor,
+        alpha=kwargs.get("alpha", 0.25),
+        clip_on=kwargs.get("clip_on", True),
+        zorder=kwargs.get("zorder", 1),
+    )
+    if shade:
+        if vertical:
+            ax.fill_betweenx(y, 0, x, **shade_kws)
+        else:
+            ax.fill_between(x, 0, y, **shade_kws)
+
+    # Set the density axis minimum to 0
+    ax.set_ylim(0, auto=None)
+
+    # Draw the legend here
+    handles, labels = ax.get_legend_handles_labels()
+
+    return ax, x, y
+
+
+def add_vertical_segment(x, height, **kwargs):
+    """Adds a vertical segment to plot."""
+    plt.plot([x, x], [0, height], **kwargs)
+
+
+def compare_local_cdf_1d(X_pred, y_post_sample, y_true_sample,
+                         n_x_eval=100, n_cdf_eval=1000, n_max_sample=100,
+                         y_eval_grid=None,
+                         save_addr='', **local_ecdf_kwargs):
+    """
+
+    Args:
+        X_pred: (np.ndarray) feature locations, size (N, 1)
+        y_post_sample: (np.ndarray) y samples from model distribution, size (N, M_post_sample)
+        y_true_sample: (np.ndarray) y samples from true distribution. size (N, M_true_sample)
+        n_x_eval: (int) Number of locations to compute cdfs at within range of X_eval .
+        n_cdf_eval: (int) Number of cdf evaluations.
+        n_max_sample: (int) Maximum number of sample to take to compute ecdf.
+        save_addr: (str) Parent address to save figures to.
+
+    Raises:
+        (ValueError) If save_addr is None
+    """
+    if not save_addr:
+        raise ValueError('save_addr cannot be None.')
+
+    local_ecdf_kwargs['y_eval_grid'] = y_eval_grid
+
+    (ecdf_diff, ecdf_true, ecdf_modl,
+     X_eval, y_eval_grid, X_pred, y_true_sample) = (
+        metric_util.ecdf_l1_dist(X_pred, y_post_sample, y_true_sample,
+                                 n_x_eval=n_x_eval, n_cdf_eval=n_cdf_eval,
+                                 n_max_sample=n_max_sample,
+                                 return_addtional_data=True,
+                                 **local_ecdf_kwargs))
+
+    if save_addr:
+        os.makedirs(save_addr, exist_ok=True)
+        plt.ioff()
+
+    for x_id in tqdm.tqdm(range(len(X_eval))):
+        save_name = os.path.join(save_addr, "{}.png".format(x_id))
+        #
+        plt.figure(figsize=(14, 6))
+        plt.subplot(221)
+        plt.scatter(X_pred, y_true_sample, marker='.', s=0.1)
+        plt.axvline(x=X_eval[x_id], c='red')
+
+        plt.subplot(223)
+        plt.plot(X_eval, ecdf_diff)
+        plt.axvline(x=X_eval[x_id], c='red')
+        plt.ylim(0, 0.2)
+        plt.title("L1 Distance = {:3f}".format(np.mean(ecdf_diff)))
+
+        #
+        plt.subplot(122)
+        quantile_val = np.linspace(0, 1, n_cdf_eval)
+        y_eval_data = y_eval_grid[x_id] if y_eval_grid.ndim > 1 else y_eval_grid
+        plt.plot(y_eval_data, ecdf_modl[x_id])
+        plt.plot(y_eval_data, ecdf_true[x_id])
+        plt.title("x = {:.3f}".format(X_eval[x_id]))
+        plt.legend(('Model CDF', 'Data CDF'))
+        if save_addr:
+            plt.savefig(save_name,
+                        bbox_inches='tight', pad_inches=0)
+            plt.close()
+
+    if save_addr:
+        plt.ion()
+
+
+""" Helper functions """
+
+
+# Plot a rectangle
+def rect(ax, x, y, w, h, c, **kwargs):
+    # Varying only in x
+    if len(c.shape) is 1:
+        rect = plt.Rectangle((x, y), w, h, color=c, ec=c, **kwargs)
+        ax.add_patch(rect)
+    # Varying in x and y
+    else:
+        # Split into a number of bins
+        N = c.shape[0]
+        hb = h / float(N);
+        yl = y
+        for i in range(N):
+            yl += hb
+            rect = plt.Rectangle((x, yl), w, hb,
+                                 color=c[i, :], ec=c[i, :], **kwargs)
+            ax.add_patch(rect)
+
+
+# Fill a contour between two lines
+def rainbow_fill_between(ax, X, Y1, Y2,
+                         colors=None, norm=None,
+                         cmap=plt.get_cmap("RdBu_r"), **kwargs):
+    plt.plot(X, Y1, lw=0)  # Plot so the axes scale correctly
+
+    dx = X[1] - X[0]
+    N = X.size
+
+    # Pad a float or int to same size as x
+    if (type(Y2) is float or type(Y2) is int):
+        Y2 = np.array([Y2] * N)
+
+    # No colors -- specify linear
+    if norm is not None and colors is not None:
+        cmap_norm = norm(colors)
+        colors = cmap(cmap_norm)
+
+    # if colors is None:
+    #     colors = []
+    #     for n in range(N):
+    #         colors.append(cmap(n / float(N)))
+    # # Varying only in x
+    # elif len(colors.shape) is 1:
+    #     colors = cmap((colors - colors.min())
+    #                   / (colors.max() - colors.min()))
+    # # Varying only in x and y
+    # else:
+    #     cnp = np.array(colors)
+    #     colors = np.empty([colors.shape[0], colors.shape[1], 4])
+    #     for i in range(colors.shape[0]):
+    #         for j in range(colors.shape[1]):
+    #             colors[i, j, :] = cmap((cnp[i, j] - cnp[:, :].min())
+    #                                    / (cnp[:, :].max() - cnp[:, :].min()))
+
+    colors = np.array(colors)
+
+    # Create the patch objects
+    for (color, x, y1, y2) in zip(colors, X, Y1, Y2):
+        rect(ax, x, y2, dx, y1 - y2, color)
+
+    return ax
+
+
+def add_color_bar(color_data, norm, cmap=plt.get_cmap("RdBu_r"),
+                  h_w_ratio=10, ytick_num=10, ax=None,
+                  color_label=None,
+                  orientation="vertical"):
+    """Plot a color bar to axis according to specified color range."""
+    if not ax:
+        _, ax = plt.subplots()
+
+    if not color_label:
+        color_label = color_data
+
+    N_color_data = color_data.size
+
+    # produce color data
+    color_data_norm = norm(color_data)
+    colors = cmap(color_data_norm)
+
+    # reshape so it is displayed horizontally/vertically
+    if orientation == "vertical":
+        colors = np.expand_dims(colors, axis=1)
+        colors = np.repeat(colors, N_color_data // h_w_ratio, axis=1)
+    else:
+        colors = np.expand_dims(colors, axis=0)
+        colors = np.repeat(colors, N_color_data // h_w_ratio, axis=0)
+
+    # plot
+    ax.imshow(colors, origin='lower')
+
+    # adjust tick
+    tick_id = np.arange(0, N_color_data + 1, step=N_color_data // ytick_num)
+    tick_id[-1] = N_color_data - 1
+
+    if orientation == "vertical":
+        ax.yaxis.set_ticks(tick_id)
+        ax.set_yticklabels(np.round(color_data[tick_id], 1))
+        ax.set_xticklabels([])
+    else:
+        ax.xaxis.set_ticks(tick_id)
+        ax.set_xticklabels(np.round(color_data[tick_id], 1))
+        ax.set_yticklabels([])
+
+    return ax
+
+
+"""Default color norm"""
+
+SIGNIFICANT_NORM = make_color_norm(
+    [np.linspace(0, 0.05, 40),
+     np.linspace(0.05, 0.95, 20),
+     np.linspace(0.95, 1, 40)],
+    method="percentile")
+
+UNC_COLOR_PALETTE = {
+    "para": "#ED553B",
+    "str_system": "#20639B",
+    "str_random": "#173F5F",
+    "alea": "grey"
+}

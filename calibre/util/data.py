@@ -1,10 +1,45 @@
 """Utility functions to generate toy datasets"""
 import numpy as np
+import scipy.stats as stats
 import random
 from mayavi import mlab
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+
+
+def sin_cos_curve_weibull_vary_skew_1d(x, sin_rate=3., cos_rate=3.):
+    """sine curve with additive Weibull noise that has varying skewness."""
+    a_val = scaled_norm_pdf(x, min_val=1.1, max_val=3)
+    eps = np.random.weibull(a=a_val, size=x.shape)
+    return sin_rate * np.sin(x) + cos_rate * np.abs(np.cos(x / 2.)) * eps
+
+
+def sin_cos_curve_skew_noise_1d(x, sin_rate=3., cos_rate=2., noise_type="adaptive_weibull"):
+    """sine curve with additive noise with (varying) skewness."""
+    if noise_type == "skewnorm":
+        a_val = scaled_segments(x, min_val=0, max_val=10,
+                                cutoff=[-4, -3, 3, 4])
+        eps = stats.skewnorm.rvs(a=a_val, size=x.shape)
+    elif noise_type == "weibull":
+        eps = np.random.weibull(a=0.5, size=x.shape)
+    elif noise_type == "adaptive_weibull":
+        a_val = scaled_segments(x, min_val=1.5, max_val=3.,
+                                cutoff=[-4, -1, 1, 4])
+        eps = np.random.weibull(a=a_val, size=x.shape)
+    else:
+        raise ValueError("noise_type '{}' not supported.".format(noise_type))
+
+    sd_rate = cos_rate * (np.abs(np.cos(x / 2.)) / 2. + .5)
+    sd_rate_adj = scaled_segments(x, min_val=1., max_val=5.,
+                                  cutoff=[-np.pi, -.5, .5, np.pi])
+    sd_rate = sd_rate * sd_rate_adj
+    return sin_rate * np.sin(x) + sd_rate * eps
+
+
+def sin_cos_curve_1d(x, sin_rate=7., cos_rate=3.):
+    eps = np.random.normal(size=len(x))
+    return sin_rate * np.sin(x) + cos_rate * np.abs(np.cos(x / 2.)) * eps
 
 
 def sin_curve_1d(x, freq=(4, 13), x_rate=1.):
@@ -58,6 +93,19 @@ def bird(x, y):
             np.cos(y) * np.exp((1 - np.sin(x)) ** 2) + (x - y) ** 2) / 100.
 
 
+def gaussian_mix(N, sd_scale=1.):
+    n_comp = 3
+    N_comp = np.repeat(N // n_comp, n_comp)
+    mu_comp = np.array([-4., 0., 4.])
+    sigma_comp = np.array([.4, .8, .4]) * sd_scale
+
+    x_sample = [np.random.normal(loc=mu_comp[i], scale=sigma_comp[i],
+                                 size=N_comp[i])
+                for i in range(n_comp)]
+
+    return np.concatenate(np.sort(x_sample))
+
+
 FUNC_LIST_1D = [sin_curve_1d, cos_curve_1d]
 FUNC_LIST_2D = [townsend, goldstein, bird, eggholder]
 
@@ -72,19 +120,21 @@ def train_test_split_id(n_data, train_perc=0.9):
 
 ##
 
-def generate_1d_data(N, f, noise_sd=0.03, seed=None,
-                     uniform_x=False, uniform_x_range=[0., 1.]):
+def generate_1d_data(N, f, f_x=None,
+                     noise_sd=None, seed=None,
+                     uniform_x_range=[0., 1.]):
     """Generate 1D regression data in Louizos and Welling (2016)"""
     np.random.seed(seed)
+    eps = 0.
 
-    if uniform_x:
+    if f_x:
+        x = f_x(N)
+    else:
         x = np.random.uniform(low=uniform_x_range[0],
                               high=uniform_x_range[1], size=N)
-    else:
-        x = np.concatenate([
-            np.random.uniform(low=0, high=0.6, size=int(N * 0.8)),
-            np.random.uniform(low=0.8, high=1, size=N - int(N * 0.8))])
-    eps = np.random.normal(loc=0, scale=noise_sd, size=N)
+
+    if noise_sd:
+        eps = np.random.normal(loc=0, scale=noise_sd, size=N)
 
     y = f(x + eps)
 
@@ -228,3 +278,27 @@ def generate_2d_data(func, size=100, data_range=(-2., 2.),
     data = np.stack([xg, yg, output], axis=-1)
 
     return data.reshape(-1, data.shape[-1]).astype(np.float32)
+
+
+"""Helper functions"""
+
+
+def scaled_norm_pdf(x, min_val, max_val):
+    dens = stats.norm.pdf(x)
+    loc = min_val
+    scale = max_val - min_val
+    return scale * dens / np.max(dens) + loc
+
+
+def scaled_segments(x, min_val=0., max_val=1.,
+                    cutoff=[-3, -1.5, 1.5, 3]):
+    lnr_interp_val_0 = (((x - cutoff[0]) * max_val + (cutoff[1] - x) * min_val) /
+                        (cutoff[1] - cutoff[0]))
+    lnr_interp_val_1 = (((cutoff[3] - x) * max_val + (x - cutoff[2]) * min_val) /
+                        (cutoff[3] - cutoff[2]))
+
+    return ((x <= cutoff[0]) * min_val +
+            ((x > cutoff[0]) & (x <= cutoff[1])) * lnr_interp_val_0 +
+            ((x > cutoff[1]) & (x <= cutoff[2])) * max_val +
+            ((x > cutoff[2]) & (x <= cutoff[3])) * lnr_interp_val_1 +
+            (x > cutoff[3]) * min_val)
