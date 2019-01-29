@@ -194,7 +194,8 @@ def sample_mfvi_mixture_family(N_sample, mixture_logits,
     return mfvi_mix_dist.sample(N_sample)
 
 
-def make_mfvi_sgp_mixture_family(n_mixture, N, gp_dist, name):
+def make_mfvi_sgp_mixture_family(n_mixture, N, gp_dist, name,
+                                 use_logistic_link=False):
     """Makes mixture of MFVI and Sparse GP variational prior
 
     Args:
@@ -221,10 +222,18 @@ def make_mfvi_sgp_mixture_family(n_mixture, N, gp_dist, name):
     mixture_par_list = [mixture_logits, mixture_logits_mfvi_mix,
                         qf_mean_mfvi_mix, qf_sdev_mfvi_mix]
 
-    mfvi_sgp_mix_dist = ed.Mixture(
-        cat=tfd.Categorical(logits=mixture_logits),
-        components=[mfvi_mix_dist, gp_dist],
-        name=name)
+    if use_logistic_link:
+        mfvi_sgp_mix_dist = ed.TransformedDistribution(
+            tfd.Mixture(
+                cat=tfd.Categorical(logits=mixture_logits),
+                components=[mfvi_mix_dist, gp_dist]),
+            bijector=tfp.bijectors.Sigmoid(),
+            name=name)
+    else:
+        mfvi_sgp_mix_dist = ed.Mixture(
+            cat=tfd.Categorical(logits=mixture_logits),
+            components=[mfvi_mix_dist, gp_dist],
+            name=name)
 
     return mfvi_sgp_mix_dist, mixture_par_list
 

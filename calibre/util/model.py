@@ -1,6 +1,7 @@
 """Utility and helper functions for building calibre models."""
 
 import tensorflow as tf
+import numpy as np
 
 """ Link functions. """
 
@@ -23,7 +24,7 @@ def sparse_softmax(logits, temp, name='weight'):
             (batch_size, num_obs, num_model).
 
     Raises:
-        ValueError: If dimension of logits is not 2
+        ValueError: If dimension of logits is less than 1
     """
     # TODO(jereliu): identify efficient method for multivariate expit
 
@@ -33,15 +34,20 @@ def sparse_softmax(logits, temp, name='weight'):
     batch_sample_size = logits.get_shape().as_list()[:-1]
 
     # check dimension
-    if not logits.get_shape().ndims >= 2:
-        raise ValueError("Dimension of logits smaller than 2. Disallowed")
+    if logits.get_shape().ndims < 1:
+        raise ValueError("Dimension of logits must be more than 1.")
 
-    # adjust dimension for broadcasting
-    dim_diff = logits.get_shape().ndims - temp.get_shape().ndims
-    temp = tf.reshape(temp, shape=temp.get_shape().as_list() + [1] * dim_diff)
+    if logits.get_shape().ndims >= 2:
+        # if dimension is 2 or more, adjust dimension for broadcasting
+        dim_diff = logits.get_shape().ndims - temp.get_shape().ndims
+        temp = tf.reshape(temp, shape=temp.get_shape().as_list() + [1] * dim_diff)
 
     # compute denominator
     log_exp_list = -logits / temp
     log_expits = log_exp_list - tf.reduce_logsumexp(log_exp_list, -1, keepdims=True)
 
     return tf.exp(log_expits, name=name)
+
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))

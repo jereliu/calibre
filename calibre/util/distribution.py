@@ -12,9 +12,13 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
+import tensorflow_probability as tfp
 from tensorflow_probability.python.edward2.generated_random_variables import _make_random_variable
 from tensorflow_probability.python.distributions import mvn_linear_operator
 from tensorflow_probability.python.distributions import mvn_full_covariance
+
+tfd = tfp.distributions
+tfb = tfp.bijectors
 
 
 # distribution definition
