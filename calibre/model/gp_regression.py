@@ -266,7 +266,7 @@ def variational_mfvi(X, mfvi_mixture=False, n_mixture=1):
     return q_f, q_sig, qf_mean, qf_sdev, mixture_par_list
 
 
-def variational_mfvi_sample(n_sample, qf_mean, qf_sdev,
+def variational_mfvi_sample(n_sample, qf_mean, qf_vcov,
                             mfvi_mixture=False, mixture_par_list=None):
     """Generates f samples from GPR mean-field variational family.
 
@@ -274,7 +274,7 @@ def variational_mfvi_sample(n_sample, qf_mean, qf_sdev,
         n_sample: (int) number of samples to draw
         qf_mean: (tf.Tensor of float32) mean parameters for
         variational family
-        qf_sdev: (tf.Tensor of float32) standard deviation
+        qf_vcov: (tf.Tensor of float32) standard deviation
         parameters for variational family
         mfvi_mixture: (bool) Whether to sample from a MFVI mixture
         mixture_par_list: (list of np.ndarray) List of mixture distribution
@@ -290,7 +290,7 @@ def variational_mfvi_sample(n_sample, qf_mean, qf_sdev,
          (np.ndarray) sampled values.
     """
 
-    q_f = tfd.MultivariateNormalDiag(loc=qf_mean, scale_diag=qf_sdev,
+    q_f = tfd.MultivariateNormalDiag(loc=qf_mean, scale_diag=qf_vcov,
                                      name='q_f')
     q_f_sample = q_f.sample(n_sample)
     if mfvi_mixture:
@@ -418,7 +418,7 @@ def variational_sgpr(X, Z, ls=1., kern_func=rbf, ridge_factor=1e-3,
     return q_f, q_sig, qf_mean, qf_cov, mixture_par_list
 
 
-def variational_sgpr_sample(n_sample, qf_mean, qf_cov,
+def variational_sgpr_sample(n_sample, qf_mean, qf_vcov,
                             mfvi_mixture=False, mixture_par_list=None):
     """Generates f samples from GPR mean-field variational family.
 
@@ -426,7 +426,7 @@ def variational_sgpr_sample(n_sample, qf_mean, qf_cov,
         n_sample: (int) number of samples to draw
         qf_mean: (tf.Tensor of float32) mean parameters for
             variational family
-        qf_cov: (tf.Tensor of float32) covariance for parameters for
+        qf_vcov: (tf.Tensor of float32) covariance for parameters for
             variational family
         mfvi_mixture: (bool) Whether to sample from a MFVI-SGP mixture
         mixture_par_list: (list of np.ndarray) List of mixture distribution
@@ -443,7 +443,7 @@ def variational_sgpr_sample(n_sample, qf_mean, qf_cov,
 
     """Generates f samples from GPR mean-field variational family."""
     q_f = tfd.MultivariateNormalFullCovariance(loc=qf_mean,
-                                               covariance_matrix=qf_cov,
+                                               covariance_matrix=qf_vcov,
                                                name='q_f')
     q_f_sample = q_f.sample(n_sample)
 

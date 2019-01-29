@@ -163,7 +163,8 @@ def sample_posterior_full(X_new, X, f_sample, ls,
                           kernel_func=rbf,
                           kernel_func_xn=None,
                           kernel_func_nn=None,
-                          ridge_factor=1e-3):
+                          ridge_factor=1e-3,
+                          return_mean=False, return_vcov=False):
     """Sample posterior predictive distribution.
 
     Sample posterior conditional from f^* | f ~ MVN, where:
@@ -211,11 +212,18 @@ def sample_posterior_full(X_new, X, f_sample, ls,
 
     # sample
     with tf.Session() as sess:
-        cond_means, cond_cov = sess.run([mu_sample, Sigma])
+        cond_means, cond_cov, Kxx_val = sess.run([mu_sample, Sigma, Kxx])
+
+    if return_mean:
+        return cond_means.astype(np.float32)
+
+    if return_vcov:
+        return cond_cov.astype(np.float32)
 
     f_new_centered = np.random.multivariate_normal(
         mean=[0] * N_new, cov=cond_cov, size=M).T
     f_new = f_new_centered + cond_means
+
     return f_new.astype(np.float32)
 
 
