@@ -10,6 +10,8 @@ Model C using a flexible model C_\theta such that
 I(Y_obs < t) = C_\theta(t, F_pred(Y<t), X_obs )
 
 """
+import tqdm
+
 import numpy as np
 import tensorflow as tf
 
@@ -152,6 +154,65 @@ def build_input_pipeline(train_data_dict, test_data_dict,
             n_train_data, n_test_data)
 
 
+# def build_local_calibration_dataset(X_obs, Y_obs, Y_sample, n_eval = 5):
+#     """Building training dataset for localized calibration.
+#
+#     Specifically, assume N observations, learn a calibration function
+#         C( F(y_obs|x), x ): F x X -> [0, 1]
+#
+#         by running monotonic regression on below dataset:
+#
+#             feature 1:      F_ij = F_i(y_j)
+#             feature 2:      x_i
+#             label:          P_{ij} = I(y_i < y_j)
+#
+#         where y_i,x_i are elements in Y_obs and X_obs,
+#         and F_i(y_j) = F(y<y_j|x_i) is the model cdf evaluated at x_i.
+#
+#     Args:
+#         X_obs: (tf.Tensor) Observed x, with dimension (n_obs, p).
+#         Y_obs: (tf.Tensor) Observed y, with dimension (n_obs, ).
+#         Y_sample: (tf.Tensor) Samples from posterior predictive for each
+#             observed y, with dimension (n_obs, n_posterior_sample).
+#         n_eval: (int) Number of y_j's to evaluate F_i's at.
+#
+#     Returns:
+#         (ValueError): If sample size indicated in Y_sample different
+#             from that of Y_obs.
+#     """
+#     X_obs = tf.convert_to_tensor(X_obs, dtype=tf.float32)
+#     Y_obs = tf.convert_to_tensor(Y_obs.squeeze(), dtype=tf.float32)
+#     Y_sample = tf.convert_to_tensor(Y_sample, dtype=tf.float32)
+#
+#     # check model dimension
+#     n_obs, = Y_obs.shape.as_list()
+#     n_obs_1, n_sample = Y_sample.shape.as_list()
+#
+#     if n_obs != n_obs_1:
+#         raise ValueError(
+#             "First dimension of y_pred_sample must be same as len(y_obs). "
+#             "Expected: {}, Observed: {}".format(n_obs, n_obs_1, ))
+#
+#     # selects evaluation points
+#     y_eval =
+#
+#     # prepare features
+#     # prepare feature 1: model cdf
+#
+#
+#     # prepare feature 2
+#     # compute empirical cdf evaluations
+#     F_obs = tf.reduce_mean(
+#         tf.cast(Y_sample < tf.expand_dims(Y_obs, -1),
+#                 dtype=tf.float32), axis=-1)
+#
+#     P_obs = tf.reduce_mean(
+#         tf.cast(tf.expand_dims(F_obs, -1) <
+#                 tf.expand_dims(F_obs, 0), dtype=tf.float32), axis=0)
+#
+#     return {"feature": F_obs, "label": P_obs}
+
+
 def build_calibration_dataset(Y_obs, Y_sample):
     """Building training dataset for nonparametric calibration.
 
@@ -204,7 +265,7 @@ def build_calibration_dataset(Y_obs, Y_sample):
     return {"feature": F_obs, "label": P_obs}
 
 
-def sample_ecdf(n_sample, base_sample, quantile, seed=None):
+def sample_ecdf(n_sample, base_sample, quantile, y_range=None, seed=None):
     """Sample observations form 1D empirical cdf using inverse CDF method.
 
     Here empirical cdf is defined by base_sample and the
@@ -216,11 +277,43 @@ def sample_ecdf(n_sample, base_sample, quantile, seed=None):
             from, shape (n_sample0, )
         quantile: (np.ndarray of float32) Quantiles corresponding to
             the base samples.
+        y_range: (tuple) (upper, lower) limit of the data.
 
     Returns:
         (np.ndarray of float32) Sample of shape (n_sample,) corresponding
             to the empirical cdf.
     """
+    quantile = quantile.squeeze()
+    # for i in range(1, len(quantile)):
+    #     quantile[i] = np.max([quantile[i], quantile[i-1]])
+
+    base_sample = np.sort(base_sample.squeeze())
+
+    # adjust sample if quantile doens't cover full range
+    min_quantile, max_quantile = quantile[0], quantile[-1]
+
+    if y_range:
+        if max_quantile < 1.:
+            additional_sample_size = int(
+                ((1 - max_quantile) / (max_quantile - min_quantile)) * len(base_sample))
+            sample_limit_lower = np.max(base_sample)
+            sample_limit_higher = y_range[1]
+
+            additional_sample = np.random.uniform(low=sample_limit_lower,
+                                                  high=sample_limit_higher,
+                                                  size=additional_sample_size)
+            base_sample = np.concatenate([base_sample, additional_sample])
+
+        if min_quantile > 0.:
+            additional_sample_size = int(
+                (min_quantile / (1 - min_quantile)) * len(base_sample))
+            sample_limit_lower = y_range[0]
+            sample_limit_higher = np.min(base_sample)
+            additional_sample = np.random.uniform(low=sample_limit_lower,
+                                                  high=sample_limit_higher,
+                                                  size=additional_sample_size)
+            base_sample = np.concatenate([base_sample, additional_sample])
+
     if len(base_sample) > len(quantile):
         base_sample = base_sample[np.random.choice(len(base_sample),
                                                    len(quantile),
@@ -231,6 +324,7 @@ def sample_ecdf(n_sample, base_sample, quantile, seed=None):
                                              replace=False)]
         quantile = np.sort(quantile.squeeze())
 
+    quantile = np.sort(quantile.squeeze())
     base_sample = np.sort(base_sample.squeeze())
 
     # identify sample id using inverse CDF lookup
@@ -239,3 +333,55 @@ def sample_ecdf(n_sample, base_sample, quantile, seed=None):
     sample_id = np.sum(np.expand_dims(sample_prob, 0) >
                        np.expand_dims(quantile, 1), axis=0) - 1
     return base_sample[sample_id]
+
+
+def resample_ecdf_batch(n_sample, base_sample_batch, quantile_batch,
+                        y_range=None, seed=None, verbose=False):
+    """Sample observations form 1D empirical cdf using inverse CDF method.
+
+    Args:
+        n_sample: (int) Number of samples.
+        base_sample_batch: (np.ndarray of float32) Base samples to sample
+            from, shape (n_batch, n_original_sample, )
+        quantile_batch: (np.ndarray of float32) Quantiles corresponding to
+            the base samples, shape (n_batch, n_quantiles, )
+        y_range: (tuple) (upper, lower) limit of the data
+        verbose: (bool) If True then print progress.
+
+    Returns:
+        (np.ndarray of float32) Sample of shape (n_batch, n_sample,)
+            corresponding to the empirical cdf.
+
+    Raises:
+        (ValueError) Batch size between base_sample_batch and
+            quantile_batch disagree.
+    """
+    n_batch0, _ = base_sample_batch.shape
+    n_batch, _ = quantile_batch.shape
+
+    if n_batch != n_batch0:
+        raise ValueError(
+            "Batch sizes for base samples ({}) and "
+            "for quantiles ({}) disagree".format(n_batch0, n_batch))
+
+    # constrain quantile values to be within [0., 1.]
+    quantile_batch[quantile_batch > 1.] = 1.
+    quantile_batch[quantile_batch < 0.] = 0.
+
+    # process by batch
+    calibrated_sample_batch = []
+    batch_range = tqdm.tqdm(range(n_batch)) if verbose else range(n_batch)
+
+    for batch_id in batch_range:
+        base_sample = base_sample_batch[batch_id]
+        quantile = quantile_batch[batch_id]
+
+        calibrated_sample = sample_ecdf(n_sample=n_sample,
+                                        base_sample=base_sample,
+                                        quantile=quantile,
+                                        y_range=y_range,
+                                        seed=seed)
+
+        calibrated_sample_batch.append(calibrated_sample)
+
+    return np.asarray(calibrated_sample_batch)

@@ -4,7 +4,7 @@ import numpy as np
 
 
 def ecdf_eval(Y_obs, Y_sample, axis=-1):
-    """Computes empirical cdf calibration (i.e. P(Y<y) ) for M samples.
+    """Computes empirical cdf calibration (i.e. P(Y<y) ) based on M samples.
 
     Args:
         Y_obs: (np.ndarray or tf.Tensor) N observations of dim (N, 1), dtype float32
@@ -279,3 +279,144 @@ def boot_sample(y_obs, y_pred, n_boot=1000, metric_func=rmse, seed=100):
     boot_sample = np.asarray(boot_sample)
 
     return np.mean(boot_sample), np.std(boot_sample), boot_sample
+
+
+"""CDF-based evaluation metrics"""
+
+
+def ecdf_l1_dist(X_pred, y_post_sample, y_true_sample,
+                 n_x_eval=100, n_cdf_eval=1000, n_max_sample=100,
+                 return_addtional_data=False, **local_ecdf_kwargs):
+    """Computes L1 distance between ecdf of two sets of samples evaluated at X_pred.
+
+    Args:
+        X_pred: (np.ndarray) feature locations, size (N, 1)
+        y_post_sample: (np.ndarray) y samples from model distribution, size (N, M_post_sample)
+        y_true_sample: (np.ndarray) y samples from true distribution. size (N, M_true_sample)
+        n_x_eval: (int) Number of locations to compute cdfs at within range of X_ecdf_eval .
+        n_cdf_eval: (int) Number of cdf evaluations.
+        n_max_sample: (int) Maximum number of sample to take to compute ecdf.
+        return_addtional_data: (bool) If True then also return 
+            reshaped X_pred and X_ecdf_eval and computed empirical CDFs.
+
+    Raises:
+        (ValueError) If save_addr is None
+    """
+    X_pred = np.squeeze(X_pred)
+    X_ecdf_eval = np.linspace(np.min(X_pred), np.max(X_pred), n_x_eval)
+
+    # adjust sample size to the smaller of M_true_sample and M_modl_sample
+    N, M_true_sample = y_true_sample.shape
+    N, M_modl_sample = y_post_sample.shape
+
+    M_sample = np.min([M_true_sample, M_modl_sample, n_max_sample])
+
+    X_pred = np.repeat(X_pred, M_sample)
+    y_true_sample = np.concatenate(y_true_sample[:, :M_sample])
+    y_post_sample = np.concatenate(y_post_sample[:, :M_sample])
+
+    ecdf_modl, _, y_eval_grid = local_ecdf_1d(x_eval=X_ecdf_eval,
+                                              X=X_pred,
+                                              y=y_post_sample,
+                                              n_cdf_eval=n_cdf_eval,
+                                              return_sample=True,
+                                              **local_ecdf_kwargs)
+
+    # make sure uses the same y_eval_grid
+    local_ecdf_kwargs["y_eval_grid"] = y_eval_grid
+    ecdf_true, _, y_eval_grid = local_ecdf_1d(x_eval=X_ecdf_eval,
+                                              X=X_pred,
+                                              y=y_true_sample,
+                                              n_cdf_eval=n_cdf_eval,
+                                              return_sample=True,
+                                              **local_ecdf_kwargs)
+
+
+    ecdf_modl = np.asarray(ecdf_modl)
+    ecdf_true = np.asarray(ecdf_true)
+
+    ecdf_diff = np.abs(ecdf_true - ecdf_modl)
+    ecdf_diff[ecdf_diff == 0] = np.nan
+    l1_distance = np.nanmean(ecdf_diff, axis=1)
+
+    if return_addtional_data:
+        return (l1_distance,
+                ecdf_true, ecdf_modl,
+                X_ecdf_eval, y_eval_grid, X_pred, y_true_sample)
+
+    return l1_distance
+
+
+def local_ecdf_1d(x_eval, X, y, x_eval_window=None,
+                  n_cdf_eval=1000, y_eval_grid=None, return_sample=False):
+    """Computes local empirical CDF evaluated at x_eval.
+
+    Args:
+        x_eval (np.ndarray of float32): M locations to eval data, size (M, )
+        X (np.ndarray of float32): Data feature of size (N, 1)
+        y (np.ndarray of float32): Data label of size (N, 1)
+        x_eval_window (float or None): Size of local window to gather y samples.
+        n_cdf_eval (int or None): Number of CDF evaluations to make. If not None
+            then return cdf evaluations.
+        y_eval_grid (np.ndarray or None): List of values to evaluate CDF at.
+            If None then will be created from percentiles of ecdf_sample.
+            If np.ndarray then its size should be either (n_cdf_eval, ) or
+            (x_eval.size, n_cdf_eval).
+        return_sample (bool): If True then return sample and y_eval_grid as well.
+
+    Returns:
+        (list of function or np.ndarray)
+
+    Raises:
+        (ValueError) If X and y are of different size
+        (ValueError) If y_eval_grid is not None and size is not (n_cdf_eval, ) or
+            (x_eval.size, n_cdf_eval)
+    """
+    X = X.flatten()
+    y = y.flatten()
+
+    if X.size != y.size:
+        raise ValueError("X and y are of different sizes.")
+
+    if not x_eval_window:
+        x_eval_window = (np.max(X) - np.min(X)) / 20.
+
+    if not isinstance(y_eval_grid, np.ndarray):
+        y_eval_grid = []
+    elif y_eval_grid.ndim > 1 and y_eval_grid.shape[0] != (x_eval.size):
+        raise ValueError(
+            "y_eval_data should be of size either (n_cdf_eval, )"
+            "or ({}, n_cdf_eval). Observed {}".format(x_eval.size, y_eval_grid.shape))
+
+    # collect local sample within range
+    ecdf_sample_list = [
+        y[(X < x_eval_val + x_eval_window) &
+          (X > x_eval_val - x_eval_window)] for x_eval_val in x_eval]
+
+    # make ecdf function
+    ecdf_list = []
+    for ecdf_id, ecdf_sample in enumerate(ecdf_sample_list):
+        ecdf_func = make_empirical_cdf_1d(ecdf_sample)
+
+        # optionally, evaluate within range of quantiles
+        if n_cdf_eval:
+            if not isinstance(y_eval_grid, np.ndarray):
+                y_eval_data = np.percentile(
+                    ecdf_sample, np.linspace(0, 100, num=n_cdf_eval))
+                y_eval_grid.append(y_eval_data)
+            elif y_eval_grid.ndim == 1:
+                y_eval_data = y_eval_grid
+            else:
+                y_eval_data = y_eval_grid[ecdf_id]
+
+            ecdf_res = ecdf_func(y_eval_data)
+        else:
+            ecdf_res = ecdf_func
+
+        ecdf_list.append(ecdf_res)
+
+    if return_sample:
+        y_eval_grid = np.asarray(y_eval_grid)
+        return ecdf_list, ecdf_sample_list, y_eval_grid
+
+    return ecdf_list
