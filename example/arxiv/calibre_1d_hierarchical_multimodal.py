@@ -24,7 +24,7 @@ import calibre.util.visual as visual_util
 import calibre.util.matrix as matrix_util
 import calibre.util.data as data_util
 import calibre.util.calibration as calib_util
-import calibre.util.experiment as experiment_util
+import calibre.util.experiment_data as experiment_util
 
 from calibre.util.inference import make_value_setter
 from calibre.util.gp_flow import fit_base_gp_models, DEFAULT_KERN_FUNC_DICT_GPFLOW

@@ -1,4 +1,4 @@
-"""Calibre (Adaptive Ensemble) with hierarchical structure using MCMC and Penalized VI.
+"""Parametric Ensemble using MCMC and Calibrated VI.
 
 Perform on multi-scale data using experiment_util.generate_data_1d_multiscale.
 
@@ -28,6 +28,9 @@ from calibre.model import tailfree_process as tail_free
 from calibre.model import gp_regression_monotone as gpr_mono
 from calibre.model import adaptive_ensemble
 
+from calibre.inference import mcmc
+from calibre.inference import vi
+
 from calibre.calibration import score
 
 import calibre.util.data as data_util
@@ -38,6 +41,7 @@ import calibre.util.gp_flow as gpf_util
 import calibre.util.ensemble as ensemble_util
 import calibre.util.calibration as calib_util
 import calibre.util.experiment_data as experiment_util
+import calibre.util.experiment_pred as pred_util
 
 from calibre.util.inference import make_value_setter
 from calibre.util.gp_flow import DEFAULT_KERN_FUNC_DICT_RBF
@@ -103,7 +107,7 @@ N_train = 50
 N_test = 50
 N_valid = 500
 
-_SAVE_ADDR_PREFIX = "./result/calibre_1d_flat_multiscale"
+_SAVE_ADDR_PREFIX = "./result/adaptive_ensemble/calibre_1d_flat_multiscale"
 
 data_gen_func_list = [
     partial(data_util.sin_curve_1d, freq=(3, 6), x_rate=0.1),
@@ -356,117 +360,32 @@ K = len(base_test_pred)
 
 family_tree_dict = _EXAMPLE_DICTIONARY_SIMPLE
 
-num_results = 5000
+num_mcmc_steps = 5000
 num_burnin_steps = 5000
 
 # define mcmc computation graph
 if _FIT_MCMC_MODELS:
-    mcmc_graph = tf.Graph()
-    with mcmc_graph.as_default():
-        # build likelihood explicitly
-        log_joint = ed.make_log_joint_fn(adaptive_ensemble.model_tailfree)
+    (mcmc_graph, init_op,
+     parameter_samples, is_accepted) = (
+        mcmc.make_inference_graph_tailfree(
+            X_test, y_test,
+            base_pred=base_test_pred,
+            family_tree=family_tree_dict,
+            default_log_ls_weight=None,
+            default_log_ls_resid=None,
+            num_mcmc_samples=num_mcmc_steps,
+            num_burnin_steps=num_burnin_steps))
 
-        # aggregate node-specific variable names
-        cond_weight_temp_names = ['temp_{}'.format(model_name) for
-                                  model_name in
-                                  tail_free.get_parent_node_names(family_tree_dict)]
-        node_weight_names = ['base_weight_{}'.format(model_name) for
-                             model_name in
-                             tail_free.get_nonroot_node_names(family_tree_dict)]
-        node_specific_varnames = cond_weight_temp_names + node_weight_names
+    parameter_samples_val = mcmc.run_sampling(mcmc_graph,
+                                              init_op, parameter_samples,
+                                              is_accepted)
 
-
-        def target_log_prob_fn(sigma, ls_weight, ls_resid,
-                               ensemble_resid,
-                               *node_specific_positional_args):
-            """Unnormalized target density as a function of states."""
-            # build kwargs for base model weight using positional args
-            node_specific_kwargs = dict(zip(node_specific_varnames,
-                                            node_specific_positional_args))
-
-            return log_joint(X=X_test,
-                             base_pred=base_test_pred,
-                             family_tree=family_tree_dict,
-                             y=y_test.squeeze(),
-                             ls_weight=ls_weight,
-                             ls_resid=ls_resid,
-                             sigma=sigma,
-                             ensemble_resid=ensemble_resid,
-                             **node_specific_kwargs)
-
-
-        # set up state container
-        initial_state = [
-                            tf.constant(0.1, name='init_sigma'),
-                            tf.constant(-1., name='init_ls_weight'),
-                            tf.constant(-1., name='init_ls_resid'),
-                            tf.random_normal([N], stddev=0.01,
-                                             name='init_ensemble_resid'),
-                        ] + [
-                            tf.random_normal([], stddev=0.01,
-                                             name='init_{}'.format(var_name)) for
-                            var_name in cond_weight_temp_names
-                        ] + [
-                            tf.random_normal([N], stddev=0.01,
-                                             name='init_{}'.format(var_name)) for
-                            var_name in node_weight_names
-                        ]
-
-        # set up HMC transition kernel
-        step_size = tf.get_variable(
-            name='step_size',
-            initializer=1.,
-            use_resource=True,  # For TFE compatibility.
-            trainable=False)
-
-        hmc = tfp.mcmc.HamiltonianMonteCarlo(
-            target_log_prob_fn=target_log_prob_fn,
-            num_leapfrog_steps=3,
-            step_size=step_size,
-            step_size_update_fn=tfp.mcmc.make_simple_step_size_update_policy())
-
-        # set up main sampler
-        state, kernel_results = tfp.mcmc.sample_chain(
-            num_results=num_results,
-            num_burnin_steps=num_burnin_steps,
-            current_state=initial_state,
-            kernel=hmc,
-            parallel_iterations=1
-        )
-
-        (sigma_sample, ls_weight_sample,
-         ls_resid_sample, ensemble_resid_sample) = state[:4]
-        temp_sample = state[4:4 + len(cond_weight_temp_names)]
-        weight_sample = state[4 + len(cond_weight_temp_names):]
-
-        # set up init op
-        init_op = tf.global_variables_initializer()
-
-        mcmc_graph.finalize()
-
-    """ 2.2. execute sampling"""
-    with tf.Session(graph=mcmc_graph) as sess:
-        init_op.run()
-        [
-            sigma_sample_val,
-            ls_weight_sample_val,
-            ls_resid_sample_val,
-            temp_sample_val,
-            resid_sample_val,
-            weight_sample_val,
-            is_accepted_,
-        ] = sess.run(
-            [
-                sigma_sample,
-                ls_weight_sample,
-                ls_resid_sample,
-                temp_sample,
-                ensemble_resid_sample,
-                weight_sample,
-                kernel_results.is_accepted,
-            ])
-        print('Acceptance Rate: {}'.format(np.mean(is_accepted_)))
-        sess.close()
+    ls_weight_sample_val = parameter_samples_val['ls_weight_sample']
+    ls_resid_sample_val = parameter_samples_val['ls_resid_sample']
+    sigma_sample_val = parameter_samples_val['sigma_sample']
+    temp_sample_val = parameter_samples_val['temp_sample']
+    weight_sample_val = parameter_samples_val['weight_sample']
+    resid_sample_val = parameter_samples_val['ensemble_resid_sample']
 
     DEFAULT_LOG_LS_WEIGHT = np.median(ls_weight_sample_val)
     DEFAULT_LOG_LS_RESID = np.median(ls_resid_sample_val)
@@ -513,42 +432,21 @@ if _FIT_MCMC_MODELS:
 
     """ 2.3.1. prediction """
     # compute GP prediction for weight GP and residual GP
-    model_weight_valid_sample = []
-    for model_weight_sample in weight_sample_val:
-        model_weight_valid_sample.append(
-            gp.sample_posterior_full(X_new=X_valid, X=X_test,
-                                     f_sample=model_weight_sample.T,
-                                     ls=np.exp(DEFAULT_LOG_LS_WEIGHT),
-                                     kernel_func=gp.rbf).T.astype(np.float32)
-        )
-
-    ensemble_resid_valid_sample = (
-        gp.sample_posterior_full(X_new=X_valid, X=X_test,
-                                 f_sample=resid_sample_val.T,
-                                 ls=np.exp(DEFAULT_LOG_LS_RESID),
-                                 kernel_func=gp.rbf).T
+    (ensemble_sample_val, ensemble_mean_val,
+     ensemble_weights_val, cond_weights_dict_val,
+     ensemble_model_names) = (
+        pred_util.prediction_tailfree(X_pred=X_valid,
+                                      base_pred_dict=base_valid_pred,
+                                      X_train=X_test,
+                                      family_tree=family_tree_dict,
+                                      weight_sample_list=weight_sample_val,
+                                      resid_sample=resid_sample_val,
+                                      temp_sample=temp_sample_val,
+                                      default_log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
+                                      default_log_ls_resid=DEFAULT_LOG_LS_RESID, )
     )
 
-    # compute sample for posterior mean
-    raw_weights_dict = dict(zip(tail_free.get_nonroot_node_names(family_tree_dict),
-                                model_weight_valid_sample))
-    parent_temp_dict = dict(zip(tail_free.get_parent_node_names(family_tree_dict),
-                                temp_sample_val))
-
-    (ensemble_sample_val, ensemble_mean_val,
-     ensemble_weights_val, cond_weights_dict_val, ensemble_model_names) = (
-        adaptive_ensemble.sample_posterior_tailfree(X=X_valid, base_pred_dict=base_valid_pred,
-                                                    family_tree=family_tree_dict,
-                                                    weight_gp_dict=raw_weights_dict, temp_dict=parent_temp_dict,
-                                                    resid_gp_sample=ensemble_resid_valid_sample,
-                                                    log_ls_weight=DEFAULT_LOG_LS_WEIGHT))
-
     # compute covariance matrix among model weights
-    model_weights_raw = np.asarray([raw_weights_dict[model_name]
-                                    for model_name in ensemble_model_names])
-    model_weights_raw = np.swapaxes(model_weights_raw, 0, -1)
-    ensemble_weight_corr = matrix_util.corr_mat(model_weights_raw, axis=0)
-
     with open(os.path.join(_SAVE_ADDR_PREFIX,
                            '{}/ensemble_posterior_mean_sample.pkl'.format(family_name)), 'wb') as file:
         pk.dump(ensemble_mean_val, file, protocol=pk.HIGHEST_PROTOCOL)
@@ -564,10 +462,6 @@ if _FIT_MCMC_MODELS:
     with open(os.path.join(_SAVE_ADDR_PREFIX,
                            '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'wb') as file:
         pk.dump(ensemble_weights_val, file, protocol=pk.HIGHEST_PROTOCOL)
-
-    with open(os.path.join(_SAVE_ADDR_PREFIX,
-                           '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'wb') as file:
-        pk.dump(ensemble_weight_corr, file, protocol=pk.HIGHEST_PROTOCOL)
 
 """ 2.3.2. visualize: base prediction """
 with open(os.path.join(_SAVE_ADDR_PREFIX,
@@ -585,10 +479,6 @@ with open(os.path.join(_SAVE_ADDR_PREFIX,
 with open(os.path.join(_SAVE_ADDR_PREFIX,
                        '{}/ensemble_posterior_model_weights.pkl'.format(family_name)), 'rb') as file:
     ensemble_weights_val = pk.load(file)
-
-with open(os.path.join(_SAVE_ADDR_PREFIX,
-                       '{}/ensemble_posterior_model_weights_corr.pkl'.format(family_name)), 'rb') as file:
-    ensemble_weight_corr = pk.load(file)
 
 if 'ensemble_model_names' in globals():
     base_pred_dict = {key: value for key, value in base_valid_pred.items()
@@ -806,20 +696,6 @@ if 'ensemble_model_names' in globals():
                                                save_addr_prefix=os.path.join(
                                                    _SAVE_ADDR_PREFIX, "{}/ensemble_family".format(family_name)))
 
-""" 2.3.8. visualize: ensemble weight covariance (model compositionality) """
-if _PLOT_COMPOSITION:
-    for i in range(ensemble_weight_corr.shape[0]):
-        corr_mat = ensemble_weight_corr[i]
-        x_value = X_valid[i][0]
-        visual_util.model_composition_1d(
-            x_value, corr_mat, ensemble_weights_val,
-            base_pred_dict,
-            X_valid, y_valid,
-            X_test, y_test,
-            model_names=ensemble_model_names,
-            save_addr=os.path.join(_SAVE_ADDR_PREFIX,
-                                   "model composition/{}.png".format(i)))
-
 """""""""""""""""""""""""""""""""
 # 3. Variational Inference
 """""""""""""""""""""""""""""""""
@@ -880,118 +756,39 @@ for family_name in family_name_list:
 
     if _FIT_VI_MODELS:
         """ 3.2. Set up the computational graph """
-        vi_graph = tf.Graph()
-        with vi_graph.as_default():
-            # sample from variational family
-            (weight_gp_dict, resid_gp, temp_dict, sigma, _, _,  # variational RVs
-             weight_gp_mean_dict, weight_gp_vcov_dict,  # variational parameters, weight GP
-             resid_gp_mean, resid_gp_vcov,  # resid GP variational parameters
-             temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
-             sigma_mean, sigma_sdev,  # variational parameters, resid GP
-             mixture_par_dict, mixture_par_resid,  # mixture parameters
-             ) = ensemble_variational_family(X=X_test,
-                                             Z=X_induce,
-                                             Zm=X_induce_mean,
-                                             base_pred=base_test_pred,
-                                             family_tree=family_tree_dict,
-                                             log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
-                                             log_ls_resid=DEFAULT_LOG_LS_RESID,
-                                             kernel_func=gp.rbf,
-                                             ridge_factor=1e-3,
-                                             mfvi_mixture=_ADD_MFVI_MIXTURE,
-                                             n_mixture=_N_MFVI_MIXTURE)
-
-            # assemble kwargs for make_value_setter
-            variational_rv_dict = {"ensemble_resid": resid_gp, "sigma": sigma, }
-            variational_rv_dict.update(temp_dict)
-            variational_rv_dict.update(weight_gp_dict)
-
-            # compute the expected predictive log-likelihood
-            with ed.tape() as model_tape:
-                with ed.interception(make_value_setter(**variational_rv_dict)):
-                    y = adaptive_ensemble.model_tailfree(X=X_test, base_pred=base_test_pred,
-                                                         family_tree=family_tree_dict,
-                                                         log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
-                                                         log_ls_resid=DEFAULT_LOG_LS_RESID, kernel_func=gp.rbf,
-                                                         ridge_factor=1e-3)
-
-            log_likelihood = y.distribution.log_prob(y_test)
-
-            # compute the KL divergence
-            kl = 0.
-            for rv_name, variational_rv in variational_rv_dict.items():
-                if _ADD_MFVI_MIXTURE:
-                    # compute MC approximation
-                    param_approx_sample = variational_rv.distribution.sample(_N_INFERENCE_SAMPLE)
-                    param_kl = tf.reduce_mean(
-                        variational_rv.distribution.log_prob(param_approx_sample) -
-                        model_tape[rv_name].distribution.log_prob(param_approx_sample))
-                else:
-                    # compute analytical form
-                    param_kl = variational_rv.distribution.kl_divergence(
-                        model_tape[rv_name].distribution)
-
-                kl += tf.reduce_sum(param_kl)
-
-            # define loss op: ELBO = E_q(p(x|z)) + KL(q || p)
-            elbo = tf.reduce_mean(log_likelihood - kl)
-
-            # define optimizer
-            optimizer = tf.train.AdamOptimizer(1e-2)
-            train_op = optimizer.minimize(-elbo)
-
-            # define init op
-            init_op = tf.global_variables_initializer()
-
-            vi_graph.finalize()
+        (vi_graph, init_op, parameter_samples,
+         train_op, elbo) = vi.make_inference_graph_tailfree(
+            X_train=X_test,
+            y_train=y_test,
+            X_induce=X_induce,
+            X_induce_mean=X_induce_mean,
+            base_pred=base_test_pred,
+            family_tree=family_tree_dict,
+            vi_family_def_func=ensemble_variational_family,
+            default_log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
+            default_log_ls_resid=DEFAULT_LOG_LS_RESID,
+            use_mfvi_mixture=_ADD_MFVI_MIXTURE,
+            n_mfvi_mixture=_N_MFVI_MIXTURE,
+            n_elbo_mc_sample=_N_INFERENCE_SAMPLE,
+            step_size=1e-2)
 
         """ 3.3. execute optimization, then sample from variational family """
-        with tf.Session(graph=vi_graph) as sess:
-            start_time = time.time()
+        parameter_samples_dict = vi.run_inference(
+            vi_graph, init_op,
+            parameter_samples, train_op, elbo,
+            max_steps=10000, print_step=500)
 
-            sess.run(init_op)
-            for step in range(max_steps):
-                start_time = time.time()
-                _, elbo_value, = sess.run([train_op, elbo])
-                if step % 500 == 0:
-                    duration = time.time() - start_time
-                    print("Step: {:>3d} ELBO: {:.3f}, ({:.3f} sec)".format(
-                        step, elbo_value, duration))
-
-            (weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
-             resid_gp_mean_val, resid_gp_vcov_val,
-             temp_mean_dict_val, temp_sdev_dict_val,
-             sigma_mean_val, sigma_sdev_val,
-             mixture_par_dict_val, mixture_par_resid_val
-             ) = sess.run([
-                weight_gp_mean_dict, weight_gp_vcov_dict,
-                resid_gp_mean, resid_gp_vcov,
-                temp_mean_dict, temp_sdev_dict,  # temperature variational parameters
-                sigma_mean, sigma_sdev,
-                mixture_par_dict, mixture_par_resid])
-
-            sess.close()
-
-        with tf.Session() as sess:
-            (weight_gp_sample_dict, temp_sample_dict,
-             resid_gp_sample, sigma_sample, _, _) = (
-                ensemble_variational_family_sample(
-                    n_final_sample,
-                    weight_gp_mean_dict_val, weight_gp_vcov_dict_val,
-                    temp_mean_dict_val, temp_sdev_dict_val, mixture_par_dict_val,
-                    resid_gp_mean_val, resid_gp_vcov_val, mixture_par_resid_val,
-                    sigma_mean_val, sigma_sdev_val,
-                    log_ls_weight_mean=DEFAULT_LOG_LS_WEIGHT,
-                    log_ls_weight_sdev=.01,
-                    log_ls_resid_mean=DEFAULT_LOG_LS_WEIGHT,
-                    log_ls_resid_sdev=.01,
-                    mfvi_mixture=_ADD_MFVI_MIXTURE,
-                ))
-
-            (weight_gp_sample_dict_val, temp_sample_dict_val,
-             resid_gp_sample_val, sigma_sample_val) = sess.run([
-                weight_gp_sample_dict, temp_sample_dict,
-                resid_gp_sample, sigma_sample])
+        (weight_gp_sample_dict_val,
+         temp_sample_dict_val,
+         resid_gp_sample_val,
+         sigma_sample_val) = vi.run_sampling(
+            n_sample=n_final_sample,
+            parameter_samples_dict=parameter_samples_dict,
+            vi_family_sampling_func=ensemble_variational_family_sample,
+            default_log_ls_weight=DEFAULT_LOG_LS_WEIGHT,
+            default_log_ls_resid=DEFAULT_LOG_LS_RESID,
+            use_mfvi_mixture=_ADD_MFVI_MIXTURE,
+        )
 
         with open(os.path.join(_SAVE_ADDR_PREFIX,
                                '{}/sigma_sample.pkl'.format(family_name)), 'wb') as file:

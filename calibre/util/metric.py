@@ -246,9 +246,10 @@ def rmse(y_obs, y_pred):
 
 def rsqure(y_obs, y_pred):
     """Computes Standardized R-square."""
-    nom = np.mean((y_obs.squeeze() - y_pred.squeeze()) ** 2)
-    denom = np.mean((y_obs.squeeze() - np.mean(y_obs)) ** 2)
-    return 1 - (nom / denom)
+    # nom = np.mean((y_obs.squeeze() - y_pred.squeeze()) ** 2)
+    # denom = np.mean((y_obs.squeeze() - np.mean(y_obs)) ** 2)
+    # return 1 - (nom / denom)
+    return np.corrcoef(y_obs, y_pred)[0, 1]**2
 
 
 def boot_sample(y_obs, y_pred, n_boot=1000, metric_func=rmse, seed=100):

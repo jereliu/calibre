@@ -277,7 +277,7 @@ with tf.Session(graph=mfvi_graph) as sess:
 with tf.Session() as sess:
     f_samples = gp_regression.variational_mfvi_sample(n_sample=10000,
                                                       qf_mean=qf_mean_val,
-                                                      qf_sdev=qf_sdev_val,
+                                                      qf_vcov=qf_sdev_val,
                                                       mfvi_mixture=_ADD_MFVI_MIXTURE,
                                                       mixture_par_list=mixture_par_list_val)
     f_samples_val = sess.run(f_samples)
@@ -403,7 +403,7 @@ with tf.Session(graph=sgp_graph) as sess:
 with tf.Session() as sess:
     f_samples_sgpr = gp_regression.variational_sgpr_sample(
         n_sample=_N_POSTERIOR_SAMPLE,
-        qf_mean=qf_mean_val, qf_cov=qf_cov_val,
+        qf_mean=qf_mean_val, qf_vcov=qf_cov_val,
         mfvi_mixture=_ADD_MFVI_MIXTURE,
         mixture_par_list=mixture_par_list_val)
 
@@ -548,7 +548,7 @@ with tf.Session(graph=dgp_graph) as sess:
 with tf.Session() as sess:
     f_samples_dgpr = gp_regression.variational_dgpr_sample(
         n_sample=_N_POSTERIOR_SAMPLE,
-        qf_mean=qf_mean_val, qf_cov=qf_cov_val,
+        qf_mean=qf_mean_val, qf_vcov=qf_cov_val,
         mfvi_mixture=_ADD_MFVI_MIXTURE,
         mixture_par_list=mixture_par_list_val)
 
