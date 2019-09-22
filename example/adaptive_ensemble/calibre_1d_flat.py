@@ -1,6 +1,7 @@
 """Calibre (Adaptive Ensemble) with flat model structure. """
 import os
 import sys
+import pathlib
 
 import pickle as pk
 import pandas as pd
@@ -35,7 +36,9 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 DEFAULT_LS_WEIGHT = 0.2
 DEFAULT_LS_RESID = 0.2
 _SAVE_ADDR_PREFIX = "./result/calibre_1d_flat"
-_FIT_BASE_MODELS = False
+_FIT_BASE_MODELS = True
+
+pathlib.Path(_SAVE_ADDR_PREFIX).mkdir(parents=True, exist_ok=True)
 
 """""""""""""""""""""""""""""""""
 # 1. Generate data
@@ -51,6 +54,8 @@ N_valid = 500
     N_train=20, N_test=20, N_valid=500, noise_sd=0.03,
     data_range=(0., 1.), valid_range=(-0.5, 1.5),
     seed_train=1000, seed_test=1500, seed_calib=100)
+
+y_valid = np.mean(y_valid, axis=1)
 
 #
 plt.plot(X_valid, y_valid, c='black')

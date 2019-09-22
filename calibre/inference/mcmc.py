@@ -23,7 +23,8 @@ from calibre.model import adaptive_ensemble
 def make_inference_graph_tailfree(X_train, y_train, base_pred, family_tree,
                                   default_log_ls_weight=None,
                                   default_log_ls_resid=None,
-                                  num_mcmc_samples=1000, num_burnin_steps=5000):
+                                  num_mcmc_samples=1000, 
+                                  num_burnin_steps=5000):
     """Defines computation graph for MCMC sampling with tailfree model.
 
     Args:
@@ -52,18 +53,12 @@ def make_inference_graph_tailfree(X_train, y_train, base_pred, family_tree,
             MCMC samples of shape (param_dim, num_mcmc_samples)
         is_accepted (tf.Tensor) A tensor indicating whether each mcmc samples is accepted.
     """
-    # TODO(jereliu): add option for automated inference when setting
-    #   log_ls_weight and log_ls_resid to None
 
+    INFER_LS_PARAM = False
     N = X_train.shape[0]
-
-    if not default_log_ls_weight:
-        default_log_ls_weight = np.log(0.35)
-    if not default_log_ls_resid:
-        default_log_ls_resid = np.log(0.1)
-
-    default_log_ls_weight = default_log_ls_weight.astype(np.float32)
-    default_log_ls_resid = default_log_ls_resid.astype(np.float32)
+    
+    if not default_log_ls_weight or not default_log_ls_resid:
+        INFER_LS_PARAM = True
 
     mcmc_graph = tf.Graph()
     with mcmc_graph.as_default():
@@ -78,30 +73,48 @@ def make_inference_graph_tailfree(X_train, y_train, base_pred, family_tree,
                              model_name in
                              tail_free.get_nonroot_node_names(family_tree)]
         node_specific_varnames = cond_weight_temp_names + node_weight_names
+        
+        if INFER_LS_PARAM:
+            # treat ls_weight and ls_resid as part of model parameter
+            # and pass them to log likelihood function.
+            def target_log_prob_fn(ls_weight, ls_resid,
+                                   sigma, ensemble_resid,
+                                   *node_specific_positional_args):
+                """Unnormalized target density as a function of states."""
+                # build kwargs for base model weight using positional args
+                node_specific_kwargs = dict(zip(node_specific_varnames,
+                                                node_specific_positional_args))
 
-        def target_log_prob_fn(sigma,
-                               ensemble_resid,
-                               *node_specific_positional_args):
-            """Unnormalized target density as a function of states."""
-            # build kwargs for base model weight using positional args
-            node_specific_kwargs = dict(zip(node_specific_varnames,
-                                            node_specific_positional_args))
-
-            return log_joint(X=X_train,
-                             base_pred=base_pred,
-                             family_tree=family_tree,
-                             y=y_train.squeeze(),
-                             log_ls_weight=default_log_ls_weight,
-                             log_ls_resid=default_log_ls_resid,
-                             sigma=sigma,
-                             ensemble_resid=ensemble_resid,
-                             **node_specific_kwargs)
+                return log_joint(X=X_train,
+                                 base_pred=base_pred,
+                                 family_tree=family_tree,
+                                 y=y_train.squeeze(),
+                                 ls_weight=ls_weight,
+                                 ls_resid=ls_resid,
+                                 sigma=sigma,
+                                 ensemble_resid=ensemble_resid,
+                                 **node_specific_kwargs)
+        else:
+            def target_log_prob_fn(sigma, ensemble_resid,
+                                   *node_specific_positional_args):
+                """Unnormalized target density as a function of states."""
+                # build kwargs for base model weight using positional args
+                node_specific_kwargs = dict(zip(node_specific_varnames,
+                                                node_specific_positional_args))
+    
+                return log_joint(X=X_train,
+                                 base_pred=base_pred,
+                                 family_tree=family_tree,
+                                 y=y_train.squeeze(),
+                                 log_ls_weight=default_log_ls_weight,
+                                 log_ls_resid=default_log_ls_resid,
+                                 sigma=sigma,
+                                 ensemble_resid=ensemble_resid,
+                                 **node_specific_kwargs)
 
         # set up state container
         initial_state = [
                             tf.constant(0.1, name='init_sigma'),
-                            # tf.constant(-1., name='init_ls_weight'),
-                            # tf.constant(-1., name='init_ls_resid'),
                             tf.random_normal([N], stddev=0.01,
                                              name='init_ensemble_resid'),
                         ] + [
@@ -113,6 +126,11 @@ def make_inference_graph_tailfree(X_train, y_train, base_pred, family_tree,
                                              name='init_{}'.format(var_name)) for
                             var_name in node_weight_names
                         ]
+        
+        if INFER_LS_PARAM:
+            initial_state = [tf.constant(-1., name='init_ls_weight'),
+                             tf.constant(-1., name='init_ls_resid'),
+                             ] + initial_state
 
         # set up HMC transition kernel
         step_size = tf.get_variable(
@@ -125,7 +143,7 @@ def make_inference_graph_tailfree(X_train, y_train, base_pred, family_tree,
             target_log_prob_fn=target_log_prob_fn,
             num_leapfrog_steps=3,
             step_size=step_size,
-            step_size_update_fn=tfp.mcmc.make_simple_step_size_update_policy())
+            step_size_update_fn=tfp.mcmc.make_simple_step_size_update_policy(num_burnin_steps))
 
         # set up main sampler
         state, kernel_results = tfp.mcmc.sample_chain(
@@ -138,11 +156,24 @@ def make_inference_graph_tailfree(X_train, y_train, base_pred, family_tree,
 
         # setup output tensors
         parameter_samples = dict()
-        parameter_samples["sigma_sample"] = state[0]
-        parameter_samples["ensemble_resid_sample"] = state[1]
-        parameter_samples["temp_sample"] = state[2:2 + len(cond_weight_temp_names)]
-        parameter_samples["weight_sample"] = state[2 + len(cond_weight_temp_names):]
-
+        param_init_idx = 0
+        if INFER_LS_PARAM:
+            param_init_idx = 2
+            parameter_samples["ls_weight_sample"] = state[0]
+            parameter_samples["ls_resid_sample"] = state[1]
+        
+        # collect other parameters
+        parameter_samples[
+            "sigma_sample"] = state[param_init_idx + 0]
+        parameter_samples[
+            "ensemble_resid_sample"] = state[param_init_idx + 1]
+        parameter_samples["temp_sample"] = (
+            state[param_init_idx + 2:
+                  param_init_idx + 2 + len(cond_weight_temp_names)])
+        parameter_samples["weight_sample"] = (
+            state[param_init_idx + 2 + len(cond_weight_temp_names):]
+        )
+        
         # set up init op
         with tf.name_scope("init_op") as scope:
             init_op = tf.global_variables_initializer()
@@ -157,11 +188,11 @@ def make_inference_graph_tailfree(X_train, y_train, base_pred, family_tree,
     return mcmc_graph, init_op, parameter_samples, is_accepted
 
 
-def run_session(mcmc_graph, init_op, parameter_samples, is_accepted):
+def run_sampling(mcmc_graph, init_op, parameter_samples, is_accepted):
     """
 
     Args:
-        mcmc_graph: (Graph) A computation graph for MCMC that contains
+        mcmc_graph: (tf.Graph) A computation graph for MCMC that contains
             init ops, parameter samples, and sampling states.
         init_op: (tf.Operation) Initialization op
         parameter_samples: (dict of tf.Tensors) Dictionary of parameters and their
